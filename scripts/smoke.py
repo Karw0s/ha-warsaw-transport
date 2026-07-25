@@ -7,7 +7,8 @@ import os
 import sys
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "warsaw_transport"))
+ADDON_DIR = os.path.join(os.path.dirname(__file__), "..", "warsaw_transport")
+sys.path.insert(0, ADDON_DIR)
 
 from app.departures import build_departures, overlay_gps, parse_czas  # noqa: E402
 from app.warsaw_api import _flatten, match_stops, normalize  # noqa: E402
@@ -132,6 +133,37 @@ def test_overlay_gps_mixed_feeds():
     check(deps[2]["live"] is False, "non-numeric brigade with no vehicle stays non-live")
 
 
+def test_lovelace_card_shipped():
+    """The card is plain JS with no build step, so just check it ships intact."""
+    card_path = os.path.join(ADDON_DIR, "lovelace", "warsaw-transport-card.js")
+    check(os.path.isfile(card_path), "lovelace card file exists")
+    with open(card_path, encoding="utf-8") as fh:
+        card = fh.read()
+    for snippet, msg in [
+        ('customElements.define("warsaw-transport-card"', "card element is registered"),
+        ('customElements.define("warsaw-transport-card-editor"', "GUI editor is registered"),
+        ("window.customCards.push", "card is listed in the dashboard card picker"),
+        ("getConfigElement", "card exposes the GUI editor"),
+        ("attributes.departures", "card reads the sensor's departures attribute"),
+    ]:
+        check(snippet in card, msg)
+
+    with open(os.path.join(ADDON_DIR, "Dockerfile"), encoding="utf-8") as fh:
+        dockerfile = fh.read()
+    check("COPY lovelace/" in dockerfile, "Dockerfile ships the lovelace folder")
+
+    with open(os.path.join(ADDON_DIR, "run.sh"), encoding="utf-8") as fh:
+        run_sh = fh.read()
+    check("www/warsaw_transport" in run_sh, "run.sh installs the card into the HA www folder")
+
+    with open(os.path.join(ADDON_DIR, "config.yaml"), encoding="utf-8") as fh:
+        config_yaml = fh.read()
+    check(
+        "homeassistant_config:rw" in config_yaml,
+        "config.yaml maps the HA config folder read-write",
+    )
+
+
 if __name__ == "__main__":
     test_flatten()
     test_stop_matching()
@@ -139,4 +171,5 @@ if __name__ == "__main__":
     test_build_departures()
     test_overlay_gps()
     test_overlay_gps_mixed_feeds()
+    test_lovelace_card_shipped()
     print("\nAll smoke tests passed.")

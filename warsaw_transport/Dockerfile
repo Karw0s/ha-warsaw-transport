@@ -13,6 +13,8 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Application code
 COPY app/ ./app/
+# Lovelace card — run.sh copies this into the HA config www/ folder on start.
+COPY lovelace/ ./lovelace/
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh
 

@@ -51,10 +51,63 @@ Each stop sensor:
   `{ line, direction, time, minutes, brigade, live, lat, lon }`.
   `live: true` means the departure is currently matched to a tracked vehicle.
 
-## 6. Dashboard card example
+## 6. The dashboard card
 
-A Markdown card that renders the next 5 departures (replace the entity id with
-your stop's entity):
+The add-on ships a custom Lovelace card that shows one stop in the style of the
+built-in weather card: the next departure gets the big-number treatment, the
+four after it sit below in a forecast-style row.
+
+### 6.1 Register the card (once)
+
+Every time the add-on starts it copies the card into your Home Assistant config
+folder at `www/warsaw_transport/warsaw-transport-card.js`, so it stays in sync
+with the add-on. You only need to tell Home Assistant about it once:
+
+1. **Settings → Dashboards → ⋮ (top right) → Resources → + Add resource**
+2. URL: `/local/warsaw_transport/warsaw-transport-card.js`
+3. Resource type: **JavaScript module**
+4. Create, then reload the page.
+
+If the Resources menu is missing, turn on **Advanced Mode** in your user profile.
+
+### 6.2 Add it to a dashboard
+
+**Edit dashboard → + Add card**, search for **Warsaw Transport**, and pick your
+stop's sensor from the dropdown. Or in YAML:
+
+```yaml
+type: custom:warsaw-transport-card
+entity: sensor.warsaw_7009_01
+```
+
+### 6.3 Card options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `entity` | *(required)* | The stop's sensor, e.g. `sensor.warsaw_7009_01`. |
+| `name` | the stop name | Override the title. |
+| `icon` | `mdi:bus` | Icon shown next to the title (e.g. `mdi:tram`). |
+| `count` | `5` | How many departures to show, `1`–`5` (the add-on publishes 5). |
+| `show_stop_id` | `true` | Show the `stop 7009 / 01` line under the title. |
+
+The countdown is recalculated in the browser every 30 seconds, so the minutes
+keep ticking down between add-on refreshes. A green **● live** marker means the
+departure is matched to a vehicle currently reporting its GPS position — exactly
+the same data the add-on's own web panel shows.
+
+### 6.4 Alternatives without the card
+
+A plain **Entities** card showing just the "minutes to next" value:
+
+```yaml
+type: entities
+title: My stops
+entities:
+  - entity: sensor.warsaw_7009_01
+  - entity: sensor.warsaw_7013_02
+```
+
+Or a **Markdown** card built from the attributes:
 
 ```yaml
 type: markdown
@@ -65,18 +118,16 @@ content: >
   {% endfor %}
 ```
 
-Or a plain **Entities** card showing the "minutes to next" value:
-
-```yaml
-type: entities
-title: My stops
-entities:
-  - entity: sensor.warsaw_7009_01
-  - entity: sensor.warsaw_7013_02
-```
-
 ## 7. Notes & limitations
 
+- The card needs the MQTT sensor: no broker configured means no entity, and
+  therefore nothing for the card to show.
+- After updating the add-on, hard-refresh the dashboard (Ctrl/Cmd+Shift+R) —
+  browsers cache files under `/local/` aggressively, so you may otherwise keep
+  running the previous version of the card.
+- If the add-on log says *"Could not install the Lovelace card"*, the config
+  folder was not writable; copy `warsaw_transport/lovelace/warsaw-transport-card.js`
+  from this repository into `<config>/www/warsaw_transport/` by hand.
 - The ZTM API exposes timetables for the **current day only**; lines that do not
   run today will have no departures.
 - The GPS overlay is best-effort — a scheduled departure is flagged `live` only

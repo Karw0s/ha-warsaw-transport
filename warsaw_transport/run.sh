@@ -28,6 +28,24 @@ fi
 
 export WT_DATA_DIR="/data"
 
+# Publish the Lovelace card into the HA config www/ folder so it can be
+# registered as a dashboard resource (and is refreshed on every add-on update).
+# Never fatal: a missing or read-only config mount must not stop the add-on.
+HA_CONFIG=""
+for candidate in /homeassistant /config; do
+    if [ -d "${candidate}" ]; then
+        HA_CONFIG="${candidate}"
+        break
+    fi
+done
+if [ -n "${HA_CONFIG}" ] \
+   && mkdir -p "${HA_CONFIG}/www/warsaw_transport" \
+   && cp /opt/warsaw_transport/lovelace/*.js "${HA_CONFIG}/www/warsaw_transport/"; then
+    bashio::log.info "Lovelace card installed to ${HA_CONFIG}/www/warsaw_transport/"
+else
+    bashio::log.warning "Could not install the Lovelace card (config folder missing or read-only)."
+fi
+
 bashio::log.info "Starting Warsaw Public Transport add-on..."
 cd /opt/warsaw_transport
 exec python3 -m app.main

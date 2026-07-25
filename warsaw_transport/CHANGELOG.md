@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- New **Warsaw Transport** Lovelace card: one stop per card, laid out like the
+  built-in weather card — the next departure as a big countdown, the following
+  four in a forecast-style row, with live-GPS markers.
+- The card is configurable from the dashboard UI (no YAML needed) and supports
+  `name`, `icon`, `count` and `show_stop_id`.
+- The add-on now installs the card into `<config>/www/warsaw_transport/` on every
+  start, so it updates along with the add-on. Register it once as a dashboard
+  resource — see DOCS.md §6. This adds the `homeassistant_config:rw` mapping.
+- The card's countdown refreshes in the browser every 30 seconds, so minutes stay
+  accurate between add-on polls.
+
 ## 0.2.0
 
 - Migrated to the `dane.um.warszawa.pl` API; `api.um.warszawa.pl` is deprecated.

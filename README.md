@@ -5,6 +5,11 @@ dashboard. Pick bus/tram stops in the add-on's web panel and each one is publish
 Home Assistant as a sensor (via MQTT Discovery) showing the **next 5 departures** relative
 to the current time, using scheduled timetables augmented with a **live GPS overlay**.
 
+It also ships a **custom Lovelace card** that puts a stop on your dashboard in the style of
+the built-in weather card — the next departure as a big countdown, the four after it in a
+forecast-style row. The add-on installs the card for you; see
+[`warsaw_transport/DOCS.md`](warsaw_transport/DOCS.md) §6.
+
 Data source: [Warsaw Open Data API](https://dane.um.warszawa.pl/) (Zarząd Transportu
 Miejskiego). An API key is required — see the add-on docs.
 
@@ -34,6 +39,7 @@ Miejskiego). An API key is required — see the add-on docs.
 |------|---------|
 | `repository.yaml` | Registers this repo as a Home Assistant add-on store. |
 | `warsaw_transport/` | The add-on itself (Docker container + FastAPI app). |
+| `warsaw_transport/lovelace/` | The custom Lovelace card (plain JS, no build step). |
 | `warsaw_transport/DOCS.md` | End-user setup and dashboard-card documentation. |
 | `scripts/smoke.py` | Offline unit checks for the parsing/merge logic. |
 | `.claude/docs/` | Reference notes on the dane.um.warszawa.pl API endpoints. |
