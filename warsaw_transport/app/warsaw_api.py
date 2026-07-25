@@ -10,7 +10,13 @@ those pairs, or an already-flat object); `_flatten` normalises all three.
 
 Two endpoints cannot be filtered server-side, so this client caches them and
 filters in Python: the stop list (whole city, ~3 MB) and the vehicle GPS feed
-(all vehicles of one type, ~180 KB).
+(all vehicles of one type, ~180 KB). The line list and timetables *can* be
+filtered server-side but only change once a day, so they are cached too — see
+`DailyCache` in cache.py.
+
+Every request that actually reaches the network is logged at INFO with its
+parameters, so the log shows which calls were made and which were served from
+a cache (cache hits log at DEBUG).
 """
 from __future__ import annotations
 
@@ -24,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from .cache import DailyCache
+
 log = logging.getLogger("warsaw_transport.api")
 
 BASE_URL = "https://dane.um.warszawa.pl/api/action"
@@ -34,13 +42,27 @@ EP_TIMETABLE = "get_ztm_odjazdy_linii_z_przystanku"
 EP_VEHICLES = "get_ztm_lokalizacja_pojazdow"
 
 # The stop list changes rarely; the GPS feed refreshes roughly every 10 seconds.
+# Timetables are published once a day, so half a day between refreshes still
+# picks up same-day corrections while keeping traffic to ~2 calls per line.
 STOPS_TTL = 24 * 3600
-VEHICLES_TTL = 10
+VEHICLES_TTL = 20
+TIMETABLE_TTL = 12 * 3600
 STOPS_CACHE_FILE = "stops_cache.json"
+TIMETABLE_CACHE_FILE = "timetable_cache.json"
 # Downloading every stop pole is ~3 MB, well beyond the default request timeout.
 STOPS_TIMEOUT = 60.0
 
 MAX_SEARCH_RESULTS = 50
+
+# Short names used in the request log, so a call is identifiable without
+# matching the long endpoint slug by eye.
+EP_LABELS = {
+    EP_STOPS: "stops",
+    EP_LINES: "lines",
+    EP_TIMETABLE: "timetable",
+    EP_VEHICLES: "vehicles",
+}
+VEHICLE_TYPE_NAMES = {1: "bus", 2: "tram"}
 
 # "ł" is a standalone codepoint that does not decompose under NFKD, so stripping
 # combining marks alone would leave it in place.
@@ -68,6 +90,24 @@ def _flatten(row: Any) -> dict[str, Any]:
     return row if isinstance(row, dict) else {}
 
 
+def describe_call(endpoint: str, payload: dict[str, Any] | None = None) -> str:
+    """Render an endpoint + its parameters as one readable log token.
+
+    The GPS feed's `type` is spelled out ("vehicles[bus]") because the bus and
+    tram calls are otherwise indistinguishable in the log. Pure function so it
+    can be unit-tested.
+    """
+    label = EP_LABELS.get(endpoint, endpoint)
+    if endpoint == EP_VEHICLES and payload:
+        vehicle_type = payload.get("type")
+        name = VEHICLE_TYPE_NAMES.get(vehicle_type)
+        label = f"{label}[{name}]" if name else label
+    if not payload:
+        return label
+    params = " ".join(f"{key}={value}" for key, value in payload.items())
+    return f"{label} {params}"
+
+
 def normalize(text: Any) -> str:
     """Casefold and strip Polish diacritics so "zeran" matches "Żerań"."""
     decomposed = unicodedata.normalize("NFKD", str(text).translate(_POLISH_L))
@@ -91,10 +131,17 @@ class WarsawApiClient:
         api_key: str,
         timeout: float = 15.0,
         cache_dir: str | None = None,
+        timetable_ttl: float = TIMETABLE_TTL,
+        vehicles_ttl: float = VEHICLES_TTL,
     ) -> None:
         self._api_key = api_key
         self._client = httpx.AsyncClient(timeout=timeout)
         self._cache_dir = cache_dir
+        self._vehicles_ttl = vehicles_ttl
+
+        # Counts requests that reached the network, so the poller can report
+        # how much traffic a sweep actually cost.
+        self.calls_made = 0
 
         self._stops: list[dict[str, Any]] = []
         self._stops_at = 0.0
@@ -102,6 +149,20 @@ class WarsawApiClient:
 
         self._vehicles: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         self._vehicles_lock = asyncio.Lock()
+
+        self._daily = DailyCache(
+            os.path.join(cache_dir, TIMETABLE_CACHE_FILE) if cache_dir else None,
+            timetable_ttl,
+            name="timetable",
+        )
+
+    def load_caches(self) -> None:
+        """Read the daily cache off disk, so startup reports what it will reuse."""
+        self._daily.load()
+
+    async def flush_caches(self) -> None:
+        """Persist the daily cache so a restart does not refetch the whole day."""
+        await self._daily.flush()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -130,9 +191,12 @@ class WarsawApiClient:
         if timeout is not None:
             kwargs["timeout"] = timeout
 
+        what = describe_call(endpoint, payload)
         for attempt in range(retries + 1):
+            started = time.monotonic()
             try:
                 # These calls only read data, so retrying a POST is safe.
+                self.calls_made += 1
                 resp = await self._client.post(f"{BASE_URL}/{endpoint}", **kwargs)
                 if resp.status_code == 401:
                     raise WarsawApiError(
@@ -140,11 +204,26 @@ class WarsawApiClient:
                     )
                 resp.raise_for_status()
                 data = resp.json()
+                log.info(
+                    "api %s -> %s in %dms, %d row(s)",
+                    what,
+                    resp.status_code,
+                    (time.monotonic() - started) * 1000,
+                    len(data) if isinstance(data, list) else 0,
+                )
                 break
             except (httpx.HTTPError, ValueError) as exc:  # network / JSON errors
                 if attempt < retries:
+                    log.warning(
+                        "api %s failed (attempt %d/%d): %s — retrying",
+                        what,
+                        attempt + 1,
+                        retries + 1,
+                        exc,
+                    )
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
+                log.warning("api %s failed after %d attempt(s): %s", what, retries + 1, exc)
                 raise WarsawApiError(f"Request to {endpoint} failed: {exc}") from exc
 
         # Success is a bare JSON array. Errors come back as an object with an
@@ -242,25 +321,38 @@ class WarsawApiClient:
     # --- lines & timetables ------------------------------------------------
 
     async def lines_for_stop(self, busstop_id: str, pole: str) -> list[str]:
-        rows = await self._call(
-            EP_LINES, {"busstopId": str(busstop_id), "busstopNr": str(pole)}
-        )
-        flat = (_flatten(row) for row in rows)
-        return [str(r["linia"]) for r in flat if r.get("linia") is not None]
+        """Lines calling at one pole. Cached for the service day — see cache.py."""
+
+        async def fetch() -> list[str]:
+            rows = await self._call(
+                EP_LINES, {"busstopId": str(busstop_id), "busstopNr": str(pole)}
+            )
+            flat = (_flatten(row) for row in rows)
+            return [str(r["linia"]) for r in flat if r.get("linia") is not None]
+
+        return await self._daily.get(f"lines|{busstop_id}|{pole}", fetch)
 
     async def timetable(
         self, busstop_id: str, pole: str, line: str
     ) -> list[dict[str, Any]]:
-        """Scheduled departures for one line at one stop pole (current day)."""
-        rows = await self._call(
-            EP_TIMETABLE,
-            {
-                "busstopId": str(busstop_id),
-                "busstopNr": str(pole),
-                "line": str(line),
-            },
-        )
-        return [_flatten(row) for row in rows]
+        """Scheduled departures for one line at one stop pole (current day).
+
+        The API publishes this once a day, so it is cached for the service day
+        rather than refetched on every poll.
+        """
+
+        async def fetch() -> list[dict[str, Any]]:
+            rows = await self._call(
+                EP_TIMETABLE,
+                {
+                    "busstopId": str(busstop_id),
+                    "busstopNr": str(pole),
+                    "line": str(line),
+                },
+            )
+            return [_flatten(row) for row in rows]
+
+        return await self._daily.get(f"timetable|{busstop_id}|{pole}|{line}", fetch)
 
     # --- live positions ----------------------------------------------------
 
@@ -280,16 +372,15 @@ class WarsawApiClient:
 
     async def _vehicle_snapshot(self, vehicle_type: int) -> list[dict[str, Any]]:
         cached = self._vehicles.get(vehicle_type)
-        if cached and time.time() - cached[0] < VEHICLES_TTL:
+        if cached and time.time() - cached[0] < self._vehicles_ttl:
             return cached[1]
 
         async with self._vehicles_lock:
             cached = self._vehicles.get(vehicle_type)
-            if cached and time.time() - cached[0] < VEHICLES_TTL:
+            if cached and time.time() - cached[0] < self._vehicles_ttl:
                 return cached[1]
 
             rows = await self._call(EP_VEHICLES, {"type": int(vehicle_type)})
             vehicles = [_flatten(row) for row in rows]
             self._vehicles[vehicle_type] = (time.time(), vehicles)
-            log.debug("Fetched %d vehicle(s) of type %s.", len(vehicles), vehicle_type)
             return vehicles

@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from .warsaw_api import WarsawApiClient, WarsawApiError
+from .warsaw_api import WarsawApiClient
 
 log = logging.getLogger("warsaw_transport.departures")
 
@@ -97,6 +97,30 @@ def overlay_gps(
     return departures
 
 
+async def fetch_vehicles(
+    client: WarsawApiClient,
+    vehicle_types: tuple[int, ...] = VEHICLE_TYPES,
+) -> list[dict[str, Any]]:
+    """One (cached) GPS snapshot per vehicle type, concatenated.
+
+    A pole can be served by both buses and trams, so both feeds are needed. The
+    result is stop-independent, so callers tracking several stops should fetch
+    it once and pass it to `next_departures` rather than letting each stop
+    trigger its own fetch.
+    """
+    vehicle_lists = await asyncio.gather(
+        *(client.vehicle_positions(t) for t in vehicle_types),
+        return_exceptions=True,
+    )
+    vehicles: list[dict[str, Any]] = []
+    for vehicle_type, vl in zip(vehicle_types, vehicle_lists):
+        if isinstance(vl, Exception):
+            log.warning("GPS feed for type %s unavailable: %s", vehicle_type, vl)
+            continue
+        vehicles.extend(vl)
+    return vehicles
+
+
 async def next_departures(
     client: WarsawApiClient,
     busstop_id: str,
@@ -105,9 +129,15 @@ async def next_departures(
     limit: int = 5,
     gps_overlay: bool = True,
     vehicle_types: tuple[int, ...] = VEHICLE_TYPES,
+    vehicles: list[dict[str, Any]] | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Full pipeline: fetch lines, fetch all timetables, merge, overlay GPS."""
+    """Full pipeline: fetch lines, fetch all timetables, merge, overlay GPS.
+
+    `vehicles` lets a caller share one GPS snapshot across several stops. `None`
+    means "fetch it here"; a list — including an empty one — is used as-is and
+    issues no request.
+    """
     now = now or datetime.now()
 
     lines = await client.lines_for_stop(busstop_id, pole)
@@ -128,23 +158,8 @@ async def next_departures(
     departures = build_departures(timetables, now, limit=limit)
 
     if gps_overlay and departures:
-        try:
-            # One (cached) snapshot per vehicle type, then flatten. A pole can
-            # be served by both buses and trams, so both feeds are needed.
-            vehicle_lists = await asyncio.gather(
-                *(client.vehicle_positions(t) for t in vehicle_types),
-                return_exceptions=True,
-            )
-            vehicles: list[dict[str, Any]] = []
-            for vehicle_type, vl in zip(vehicle_types, vehicle_lists):
-                if isinstance(vl, Exception):
-                    log.warning(
-                        "GPS feed for type %s unavailable: %s", vehicle_type, vl
-                    )
-                    continue
-                vehicles.extend(vl)
-            overlay_gps(departures, vehicles)
-        except WarsawApiError as exc:
-            log.warning("GPS overlay skipped: %s", exc)
+        if vehicles is None:
+            vehicles = await fetch_vehicles(client, vehicle_types)
+        overlay_gps(departures, vehicles)
 
     return departures

@@ -33,6 +33,40 @@ Miejskiego). An API key is required — see the add-on docs.
   published via MQTT Discovery.
 - A free API key from <https://dane.um.warszawa.pl/pl/key-api>.
 
+## API usage and caching
+
+The API is polled once every `poll_interval` seconds (default 30), but only the data that
+actually changes is refetched:
+
+| Endpoint | How often |
+|---|---|
+| `get_ztm_lokalizacja_pojazdow` (live GPS) | Twice per sweep — one bus feed, one tram feed — **shared by every tracked stop**. |
+| `get_ztm_lista_linii_na_przystanku` (lines at a pole) | Once per stop per service day. |
+| `get_ztm_odjazdy_linii_z_przystanku` (timetable) | Once per stop+line per service day (the API publishes it daily). |
+| `get_ztm_przystanki_komunikacji_miejskiej` (stop list) | Once a day, on demand when searching. |
+
+Timetables are cached in `/data/timetable_cache.json` and reused across restarts. The
+service day rolls over at 04:00 rather than midnight, so after-midnight departures
+(expressed as hours ≥ 24, e.g. `25:14`) are not dropped when the clock passes midnight.
+
+Every request that reaches the network is logged at INFO with its parameters, so the log
+shows exactly what was called and what was served from cache:
+
+```
+INFO warsaw_transport.api: api vehicles[bus] type=1 -> 200 in 41ms, 1832 row(s)
+INFO warsaw_transport.api: api vehicles[tram] type=2 -> 200 in 46ms, 412 row(s)
+INFO warsaw_transport.api: api timetable busstopId=7009 busstopNr=01 line=190 -> 200 in 34ms, 42 row(s)
+INFO warsaw_transport: Poll sweep: 2 stop(s), 2 API call(s) in 0.1s.
+```
+
+Set `log_level: debug` to also see cache hits. Two extra knobs are available as environment
+variables (no add-on option, they rarely need changing):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WT_TIMETABLE_TTL` | `43200` (12 h) | Seconds before a cached timetable/line list is refreshed. Entries always expire at the service-day rollover regardless. |
+| `WT_VEHICLES_TTL` | `poll_interval`, capped at 20 | Seconds a GPS snapshot is shared between the poller and the web panel. |
+
 ## What's in this repo
 
 | Path | Purpose |

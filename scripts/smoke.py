@@ -3,15 +3,34 @@
 Run:  python3 scripts/smoke.py
 Exits non-zero if any assertion fails.
 """
+import asyncio
+import json
 import os
 import sys
+import tempfile
+import time
 from datetime import datetime
 
 ADDON_DIR = os.path.join(os.path.dirname(__file__), "..", "warsaw_transport")
 sys.path.insert(0, ADDON_DIR)
 
-from app.departures import build_departures, overlay_gps, parse_czas  # noqa: E402
-from app.warsaw_api import _flatten, match_stops, normalize  # noqa: E402
+from app.cache import DailyCache, service_day  # noqa: E402
+from app.departures import (  # noqa: E402
+    build_departures,
+    next_departures,
+    overlay_gps,
+    parse_czas,
+)
+from app.warsaw_api import (  # noqa: E402
+    EP_LINES,
+    EP_STOPS,
+    EP_TIMETABLE,
+    EP_VEHICLES,
+    _flatten,
+    describe_call,
+    match_stops,
+    normalize,
+)
 
 
 def check(cond, msg):
@@ -19,6 +38,11 @@ def check(cond, msg):
         print(f"FAIL: {msg}")
         sys.exit(1)
     print(f"ok: {msg}")
+
+
+def run(coro):
+    """Run one coroutine to completion; the tests below are otherwise sync."""
+    return asyncio.run(coro)
 
 
 def test_flatten():
@@ -133,6 +157,205 @@ def test_overlay_gps_mixed_feeds():
     check(deps[2]["live"] is False, "non-numeric brigade with no vehicle stays non-live")
 
 
+def test_service_day():
+    """Departures after midnight belong to the previous service day (04:00 boundary)."""
+    check(service_day(datetime(2026, 7, 25, 23, 0)) == "2026-07-25", "late evening -> same day")
+    check(service_day(datetime(2026, 7, 26, 3, 59)) == "2026-07-25", "03:59 -> previous day")
+    check(service_day(datetime(2026, 7, 26, 4, 0)) == "2026-07-26", "04:00 -> new service day")
+
+
+def test_daily_cache():
+    """Timetables must be fetched once per service day, not once per poll."""
+    calls = []
+
+    async def factory(tag="a"):
+        calls.append(tag)
+        return {"rows": [tag]}
+
+    cache = DailyCache(None, ttl=3600)
+    check(run(cache.get("k", factory)) == {"rows": ["a"]}, "first get calls the factory")
+    check(run(cache.get("k", factory)) == {"rows": ["a"]}, "second get is served from cache")
+    check(len(calls) == 1, f"factory called exactly once, got {len(calls)}")
+
+    run(cache.get("other", factory))
+    check(len(calls) == 2, "a different key is fetched separately")
+
+    # Expiry: rewind the stored timestamp past the TTL.
+    day, _, value = cache._entries["k"]
+    cache._entries["k"] = (day, time.time() - 4000, value)
+    run(cache.get("k", factory))
+    check(len(calls) == 3, "an entry older than the TTL is refetched")
+
+    # Service-day rollover invalidates even a fresh entry.
+    _, at, value = cache._entries["k"]
+    cache._entries["k"] = ("1999-01-01", at, value)
+    run(cache.get("k", factory))
+    check(len(calls) == 4, "an entry from another service day is refetched")
+
+
+def test_daily_cache_single_flight():
+    """A cold stop fans out one timetable request per line; identical keys must share."""
+    calls = []
+
+    async def slow():
+        calls.append(1)
+        await asyncio.sleep(0.01)
+        return ["rows"]
+
+    cache = DailyCache(None, ttl=3600)
+
+    async def race():
+        return await asyncio.gather(*(cache.get("same", slow) for _ in range(5)))
+
+    results = run(race())
+    check(len(calls) == 1, f"concurrent gets of one key fetch once, got {len(calls)}")
+    check(all(r == ["rows"] for r in results), "every concurrent caller gets the value")
+
+
+def test_daily_cache_persistence():
+    """A restart must replay the day's timetables instead of refetching them."""
+    calls = []
+
+    async def factory():
+        calls.append(1)
+        return ["rows"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "timetable_cache.json")
+        cache = DailyCache(path, ttl=3600, name="timetable")
+        run(cache.get("timetable|7009|01|190", factory))
+        run(cache.flush())
+        check(os.path.isfile(path), "flush writes the cache file")
+
+        # A stale-day entry is written but must not survive the next load.
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        payload["entries"]["timetable|7009|01|999"] = {
+            "day": "1999-01-01", "at": time.time(), "value": ["old"],
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+
+        # A fresh process warms the cache up front, the way the app's lifespan
+        # does, so startup reports what it will reuse before any request.
+        reloaded = DailyCache(path, ttl=3600, name="timetable")
+        reloaded.load()
+        check(
+            "timetable|7009|01|190" in reloaded._entries,
+            "an eager load() populates the cache before the first get()",
+        )
+        entries_after_first_load = dict(reloaded._entries)
+        reloaded.load()
+        check(
+            reloaded._entries == entries_after_first_load,
+            "load() is idempotent — a second call changes nothing",
+        )
+        check(
+            run(reloaded.get("timetable|7009|01|190", factory)) == ["rows"],
+            "a fresh process reads the value back from disk",
+        )
+        check(len(calls) == 1, "reloading from disk issues no new request")
+        check(
+            "timetable|7009|01|999" not in reloaded._entries,
+            "entries from an old service day are pruned on load",
+        )
+
+        # A file holding only other service days must start cold, not reuse it.
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"entries": {"timetable|7009|01|190": {
+                "day": "1999-01-01", "at": time.time(), "value": ["old"],
+            }}}, fh)
+        yesterday = DailyCache(path, ttl=3600, name="timetable")
+        yesterday.load()
+        check(yesterday._entries == {}, "a cache from another service day loads empty")
+        check(
+            run(yesterday.get("timetable|7009|01|190", factory)) == ["rows"],
+            "a stale service day refetches rather than serving yesterday's timetable",
+        )
+        check(len(calls) == 2, "the stale-day refetch hit the factory")
+
+        # An unreadable file must degrade to an empty cache, not crash.
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        broken = DailyCache(path, ttl=3600, name="timetable")
+        run(broken.get("k", factory))
+        check(len(calls) == 3, "a corrupt cache file is ignored, not fatal")
+
+        # A missing file is the fresh-install path: cold, but not an error.
+        os.remove(path)
+        cold = DailyCache(path, ttl=3600, name="timetable")
+        cold.load()
+        check(cold._entries == {}, "a missing cache file starts cold")
+        run(cold.get("k", factory))
+        check(len(calls) == 4, "a cold start fetches")
+
+
+def test_describe_call():
+    """Every logged request must name its endpoint and parameters."""
+    bus = describe_call(EP_VEHICLES, {"type": 1})
+    tram = describe_call(EP_VEHICLES, {"type": 2})
+    check(bus == "vehicles[bus] type=1", f"bus GPS call is labelled: {bus}")
+    check(tram == "vehicles[tram] type=2", f"tram GPS call is labelled: {tram}")
+    check(bus != tram, "bus and tram GPS calls are distinguishable in the log")
+
+    check(
+        describe_call(EP_TIMETABLE, {"busstopId": "7009", "busstopNr": "01", "line": "190"})
+        == "timetable busstopId=7009 busstopNr=01 line=190",
+        "timetable call shows stop and line",
+    )
+    check(
+        describe_call(EP_LINES, {"busstopId": "7009", "busstopNr": "01"})
+        == "lines busstopId=7009 busstopNr=01",
+        "line-list call shows the stop",
+    )
+    check(describe_call(EP_STOPS) == "stops", "parameterless call is just its label")
+
+
+class _FakeClient:
+    """Counts API calls so the tests can assert on request volume."""
+
+    def __init__(self, lines=("190", "500")):
+        self._lines = list(lines)
+        self.calls = {"lines": 0, "timetable": 0, "vehicles": 0}
+
+    async def lines_for_stop(self, busstop_id, pole):
+        self.calls["lines"] += 1
+        return self._lines
+
+    async def timetable(self, busstop_id, pole, line):
+        self.calls["timetable"] += 1
+        return [{"czas": "14:05:00", "kierunek": "Marymont", "brygada": "2"}]
+
+    async def vehicle_positions(self, vehicle_type, line=None):
+        self.calls["vehicles"] += 1
+        return [{"Lines": "190", "Brigade": "2", "Lat": 52.2, "Lon": 21.0}]
+
+
+def test_shared_vehicle_snapshot():
+    """The GPS feeds are city-wide: one snapshot must serve every tracked stop."""
+    now = datetime(2026, 7, 25, 14, 0, 0)
+
+    # Left to itself, a stop fetches one snapshot per vehicle type.
+    client = _FakeClient()
+    run(next_departures(client, "7009", "01", now=now))
+    check(client.calls["vehicles"] == 2, "unshared call fetches the bus and tram feeds")
+
+    # A caller that already has a snapshot must issue no vehicle request at all,
+    # however many stops it processes.
+    client = _FakeClient()
+    shared = [{"Lines": "190", "Brigade": "2", "Lat": 52.3, "Lon": 21.1}]
+    deps = []
+    for pole in ("01", "02", "03"):
+        deps += run(next_departures(client, "7009", pole, vehicles=shared, now=now))
+    check(client.calls["vehicles"] == 0, "a shared snapshot triggers no GPS requests")
+    check(any(d["live"] and d["lat"] == 52.3 for d in deps), "the shared snapshot still overlays")
+
+    # [] means "we tried and failed" — skip the overlay rather than refetching.
+    client = _FakeClient()
+    run(next_departures(client, "7009", "01", vehicles=[], now=now))
+    check(client.calls["vehicles"] == 0, "an empty snapshot skips the overlay, no refetch")
+
+
 def test_card_install_detection():
     """Settings.card_installed must reflect the file on disk, not just the env var."""
     from app.config import load_settings  # noqa: PLC0415 - env is set per-case below
@@ -228,6 +451,12 @@ if __name__ == "__main__":
     test_build_departures()
     test_overlay_gps()
     test_overlay_gps_mixed_feeds()
+    test_service_day()
+    test_daily_cache()
+    test_daily_cache_single_flight()
+    test_daily_cache_persistence()
+    test_describe_call()
+    test_shared_vehicle_snapshot()
     test_lovelace_card_shipped()
     test_card_install_detection()
     print("\nAll smoke tests passed.")
