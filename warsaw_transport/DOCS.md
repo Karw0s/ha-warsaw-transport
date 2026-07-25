@@ -14,7 +14,7 @@ and publishes each one to Home Assistant as a sensor you can put on a dashboard.
 ## 2. Installation
 
 1. **Settings → Add-ons → Add-on Store → ⋮ → Repositories** and add:
-   `https://github.com/mkarwowski/ha-public-transport`
+   `https://github.com/Karw0s/ha-warsaw-transport`
 2. Install **Warsaw Public Transport**.
 3. Open the **Configuration** tab and paste your API key into **`api_key`**
    (the field is hidden as it is a password/secret). Save.

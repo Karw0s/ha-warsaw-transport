@@ -2,7 +2,7 @@ name: Warsaw Public Transport
 version: "0.1.0"
 slug: warsaw_transport
 description: Live Warsaw bus/tram departures on your dashboard via MQTT Discovery.
-url: https://github.com/mkarwowski/ha-public-transport/tree/main/warsaw_transport
+url: https://github.com/Karw0s/ha-warsaw-transport/tree/main/warsaw_transport
 arch:
   - aarch64
   - amd64

@@ -15,7 +15,7 @@ Miejskiego). An API key is required — see the add-on docs.
 3. Add this repository URL:
 
    ```
-   https://github.com/mkarwowski/ha-public-transport
+   https://github.com/Karw0s/ha-warsaw-transport
    ```
 
 4. Install the **Warsaw Public Transport** add-on that appears.
