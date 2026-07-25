@@ -17,6 +17,7 @@ from .config import Settings, load_settings
 from .departures import fetch_vehicles, next_departures
 from .eta import VehicleTracker, to_float
 from .mqtt_publisher import MqttPublisher
+from .routes import RouteCatalog, build_provider
 from .store import StopStore
 from .warsaw_api import WarsawApiClient, WarsawApiError
 
@@ -29,6 +30,7 @@ class AppState:
     settings: Settings
     client: WarsawApiClient
     store: StopStore
+    routes: RouteCatalog
     mqtt: MqttPublisher | None = None
     poller: asyncio.Task | None = None
     # One tracker for the whole process: the arrival estimate is built from how a
@@ -64,12 +66,37 @@ async def stop_location(stop: dict[str, Any]) -> tuple[float, float] | None:
     return found
 
 
+async def route_track_resolver(stop: dict[str, Any]):
+    """A `(line, route_code) -> RouteTrack` lookup bound to one stop.
+
+    Returns None when route plans are off or unavailable, which leaves the ETA
+    on its straight-line measurement. The catalogue is fetched at most once per
+    service day and the geometry is memoised, so this is cheap per poll.
+    """
+    if not state.routes.enabled:
+        return None
+    try:
+        await state.routes.ensure()
+        locate = await state.client.stop_coordinate_map()
+    except WarsawApiError as exc:
+        log.warning("Route geometry unavailable for %s: %s", stop["id"], exc)
+        return None
+    if not state.routes.loaded:
+        return None
+
+    def resolve(line: str, code: str):
+        return state.routes.track_for(stop["busstop_id"], stop["pole"], line, code, locate)
+
+    return resolve
+
+
 async def compute_and_publish(
     stop: dict[str, Any],
     vehicles: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Compute departures for a stop and push to MQTT (if enabled)."""
     location = await stop_location(stop) if state.settings.gps_overlay else None
+    tracks = await route_track_resolver(stop) if location else None
     departures = await next_departures(
         state.client,
         stop["busstop_id"],
@@ -79,6 +106,7 @@ async def compute_and_publish(
         vehicles=vehicles,
         stop_location=location,
         tracker=state.tracker,
+        route_track_for=tracks,
     )
     if state.mqtt is not None:
         state.mqtt.publish_state(stop, departures)
@@ -115,6 +143,7 @@ async def poll_loop() -> None:
 
         state.tracker.prune()
         await state.client.flush_caches()
+        await state.routes.flush()
         log.info(
             "Poll sweep: %d stop(s), %d API call(s) in %.1fs.",
             len(stops),
@@ -143,6 +172,17 @@ async def lifespan(app: FastAPI):
     state.client.load_caches()
     state.store = StopStore(settings.data_dir)
 
+    state.routes = RouteCatalog(
+        build_provider(settings.legacy_api_key, settings.legacy_api_base),
+        cache_dir=settings.data_dir,
+    )
+    state.routes.load()
+    if not settings.routes_enabled:
+        log.info(
+            "No legacy API key: arrival estimates use straight-line distance. "
+            "Set legacy_api_key to estimate along the vehicle's route instead."
+        )
+
     if settings.mqtt_enabled:
         try:
             state.mqtt = MqttPublisher(
@@ -168,8 +208,10 @@ async def lifespan(app: FastAPI):
             state.poller.cancel()
         if state.mqtt:
             state.mqtt.disconnect()
-        # Keep the day's timetables across a restart.
+        # Keep the day's timetables and route plans across a restart.
         await state.client.flush_caches()
+        await state.routes.flush()
+        await state.routes.aclose()
         await state.client.aclose()
 
 
@@ -187,6 +229,8 @@ async def health() -> dict[str, Any]:
         "mqtt": state.mqtt is not None,
         "gps_overlay": settings.gps_overlay,
         "saved_stops": len(state.store.list_stops()),
+        # Route plans: what the ETA is measuring along, and whether they loaded.
+        "routes": state.routes.report(),
         # Lovelace card install state — the panel pairs this with a fetch of
         # CARD_URL to tell "not installed" apart from "installed but Home
         # Assistant is not serving /local yet".
@@ -276,6 +320,7 @@ async def departures_for(stop_id: str) -> Any:
         raise HTTPException(status_code=404, detail="stop not found")
     try:
         location = await stop_location(stop) if state.settings.gps_overlay else None
+        tracks = await route_track_resolver(stop) if location else None
         deps = await next_departures(
             state.client,
             stop["busstop_id"],
@@ -284,6 +329,7 @@ async def departures_for(stop_id: str) -> Any:
             gps_overlay=state.settings.gps_overlay,
             stop_location=location,
             tracker=state.tracker,
+            route_track_for=tracks,
         )
     except WarsawApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

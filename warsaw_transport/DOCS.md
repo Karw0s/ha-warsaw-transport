@@ -25,9 +25,28 @@ and publishes each one to Home Assistant as a sensor you can put on a dashboard.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `api_key` | *(empty)* | Your dane.um.warszawa.pl key. Stored as a secret (password field). |
+| `legacy_api_key` | *(empty)* | **Optional.** An api.um.warszawa.pl key, which unlocks sharper arrival estimates — see §3.1. Also a secret. |
 | `poll_interval` | `30` | Seconds between departure refreshes (minimum 10). |
 | `gps_overlay` | `true` | Match scheduled departures to live vehicle GPS (line + brigade). |
 | `log_level` | `info` | `debug`, `info`, `warning`, or `error`. |
+
+### 3.1 Why there are two API keys
+
+Everything the add-on needs comes from `dane.um.warszawa.pl` **except one dataset**:
+the route plans that say which stops each trip serves and how far apart they are.
+That one is still only published on the older `api.um.warszawa.pl` host, which
+issues its own keys.
+
+- **Without `legacy_api_key`** — everything works; arrival estimates are measured
+  as the crow flies between the vehicle and your stop.
+- **With `legacy_api_key`** — estimates are measured *along the route the vehicle
+  is actually driving*, using the times it reached the previous stops. They are
+  noticeably steadier, and the card can say how many stops away the vehicle is.
+
+Register at <https://api.um.warszawa.pl/> (free, separate from your
+dane.um.warszawa.pl account) and paste the key into `legacy_api_key`. The route
+catalogue is downloaded once a day (~3.7 MB) and cached on `/data`; it adds no
+per-poll requests. The add-on's web panel header shows which mode is in use.
 
 ## 4. Choosing stops
 
@@ -50,25 +69,39 @@ Each stop sensor:
 - **Attributes** — `stop_name`, `busstop_id`, `pole`, `next_eta_minutes` (the live
   estimate for the first departure, or `null`), and a `departures` list of the
   next 5:
-  `{ line, direction, time, minutes, brigade, live, lat, lon, eta_time,
-  eta_minutes, eta_timestamp, delay_minutes, eta_source, eta_status, distance_m }`.
+  `{ line, direction, time, minutes, brigade, route, live, lat, lon, eta_time,
+  eta_minutes, eta_timestamp, delay_minutes, eta_source, eta_status, distance_m,
+  route_distance_m, stops_away }`.
   `live: true` means the departure is currently matched to a tracked vehicle.
 
 ### 5.1 The arrival estimate
 
-The city API publishes vehicle positions and nothing else — no predicted arrivals
-and no route geometry. The add-on estimates the arrival from how quickly the gap
-between the vehicle and your stop is closing from one poll to the next, so traffic
-and detours are already reflected in the number.
+The city API publishes vehicle positions and nothing else — no predicted arrivals.
+The add-on works the arrival out for itself, in one of two ways.
+
+**Along the route** (when `legacy_api_key` is set — see §3.1). The vehicle is placed
+on the sequence of stops its trip actually serves, which gives the real distance it
+still has to cover, and its speed is measured from the times it reached the previous
+stops. Because that speed is measured stop to stop it already includes the seconds
+spent standing at them. This is the accurate mode: the predicted arrival stays put
+from poll to poll instead of drifting.
+
+**As the crow flies** (always available). Without route plans the only signal is how
+fast the straight-line gap to your stop is shrinking between polls. Traffic and
+detours still show up in that rate, but the estimate is coarser and is withheld more
+often.
 
 | Field | Meaning |
 |---|---|
 | `eta_time` | Estimated arrival, `HH:MM` (`eta_timestamp` is the full ISO value). |
 | `eta_minutes` | Minutes until that arrival, at the moment the add-on published it. |
 | `delay_minutes` | Estimate minus timetable: `+3` is three minutes late, `-1` early. |
-| `eta_source` | `tracked` — measured from two or more GPS fixes. `approx` — a rough figure from a typical urban speed, used for the first ~30 s after a vehicle appears. |
+| `eta_source` | `route` — measured along the vehicle's route. `tracked` — measured from the straight-line gap closing. `approx` — a rough figure from a typical urban speed, used for the first ~30 s after a vehicle appears. |
 | `eta_status` | `ok`, or why there is no estimate (below). |
 | `distance_m` | Straight-line distance from the vehicle to the stop. |
+| `route_distance_m` | Metres still to travel **on the route**; `null` without route plans. |
+| `stops_away` | Stops the vehicle must still serve before yours (`1` = next stop); `null` without route plans. |
+| `route` | The trip's route variant code, e.g. `TO-FSOpOko`. |
 
 An estimate is withheld — `eta_time: null`, with the departure still marked
 `live` — when the vehicle's positions cannot support one:
@@ -78,11 +111,14 @@ An estimate is withheld — `eta_time: null`, with the departure still marked
 | `moving_away` | The vehicle is getting further from the stop; a brigade runs back and forth all day, so it is on another leg of its run. |
 | `stalled` | It has not moved at all since it was first seen, e.g. parked mid-run. |
 | `waiting` | The estimate lands far ahead of the timetable — a layover at a terminus, where the schedule is the better predictor. |
+| `passed` | It is already beyond your stop on this route, so this trip has served you. (Route plans only.) |
 | `stale_fix` | Its last GPS fix is too old to trust. |
 | `too_far` | It is more than 20 km away. |
 
 Estimates need `gps_overlay: true` (the default) and the stop's coordinates, which
-the add-on stores when you add it.
+the add-on stores when you add it. Route-measured estimates additionally need
+`legacy_api_key`; without it the fields above still appear, with `eta_source` never
+being `route` and `route_distance_m`/`stops_away` staying `null`.
 
 ## 6. The dashboard card
 
@@ -143,9 +179,10 @@ When that vehicle's position supports an estimate, it appears beside the
 scheduled time as `14:05 → 14:07`, with the delay as a chip: amber when the bus
 is running late, green when it is on time or early. A `~` before the time (as in
 `→ ~14:07`) marks a rough first guess, replaced by a measured one within about a
-poll. The big countdown always stays on the timetable, so it means the same thing
-whether or not a vehicle is being tracked — see §5.1 for how the estimate is made
-and when it is deliberately left out.
+poll. With route plans configured (§3.1) the card also shows how far off the
+vehicle is — `3 stops away`, or `next stop`. The big countdown always stays on the
+timetable, so it means the same thing whether or not a vehicle is being tracked —
+see §5.1 for how the estimate is made and when it is deliberately left out.
 
 ### 6.4 Alternatives without the card
 

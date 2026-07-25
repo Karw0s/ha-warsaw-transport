@@ -166,6 +166,8 @@ class WarsawApiClient:
         # is refreshed; -1.0 can never equal a real _stops_at timestamp.
         self._stop_index: dict[tuple[str, str], dict[str, Any]] = {}
         self._stop_index_at = -1.0
+        self._coords: dict[tuple[str, str], tuple[float, float]] = {}
+        self._coords_at = -1.0
 
         self._vehicles: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         self._vehicles_lock = asyncio.Lock()
@@ -364,6 +366,27 @@ class WarsawApiClient:
             if row is not None:
                 return stop_coords(row)
         return None
+
+    async def stop_coordinate_map(self) -> dict[tuple[str, str], tuple[float, float]]:
+        """Every pole's coordinates, keyed by (zespol, slupek).
+
+        Route plans name their stops the same way, so this is what turns a route
+        into a line on the map (see routes.build_track). Built once per stop-list
+        refresh and shared, since it is ~6,600 entries.
+        """
+        await self._ensure_stops()
+        if self._coords_at != self._stops_at:
+            self._coords = {}
+            for row in self._stops:
+                key = (
+                    str(row.get("zespol", "")).strip(),
+                    str(row.get("slupek", "")).strip(),
+                )
+                point = stop_coords(row)
+                if point is not None:
+                    self._coords[key] = point
+            self._coords_at = self._stops_at
+        return self._coords
 
     # --- lines & timetables ------------------------------------------------
 

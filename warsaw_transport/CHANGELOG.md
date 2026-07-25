@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.0
+
+- **Arrival estimates can now be measured along the vehicle's route.** Given the
+  route plan for the trip, the add-on knows the stops it still has to serve, the
+  real distance to cover, and how long it took over the previous stops — so the
+  estimate is built from actual progress rather than from the straight-line gap.
+  Predictions stay put from one poll to the next instead of drifting, and a
+  vehicle looping or approaching down a parallel street no longer reads as
+  "moving away".
+- New optional **`legacy_api_key`** option. Route plans are the one dataset with
+  no equivalent on `dane.um.warszawa.pl`, so they come from the older
+  `api.um.warszawa.pl` host, which issues its own keys — register free at
+  <https://api.um.warszawa.pl/>. **Without it nothing changes**: estimates keep
+  using the straight-line measurement introduced in 0.5.0.
+- The catalogue (~3.7 MB, 2,049 route variants) is fetched **once a day** and
+  cached in `/data/routes_cache.json`. Polling still costs two API calls per
+  cycle regardless of how many stops you track.
+- Departures gained `route_distance_m` (metres still to travel on the route),
+  `stops_away` (`1` = next stop) and `route` (the trip's route code);
+  `eta_source` gained `route`, and `eta_status` gained `passed` for a trip that
+  has already served your stop. The card shows `3 stops away` under the next
+  departure, and the panel header says which estimation mode is in use.
+- Route plan access is behind a provider adapter (`app/routes.py`), so if the
+  dataset reappears on `dane.um.warszawa.pl` only that one class changes.
+- **Note on the upstream data:** `public_transport_routes` documents `odleglosc`
+  as the distance from the start of the route, but it is really the distance from
+  the *previous* stop — reading it as documented makes 44% of segments negative.
+  The add-on sums it itself; see `.claude/docs/endpoint-trasy-pojazdow.md`.
+
 ## 0.5.0
 
 - **Live arrival estimates.** A departure matched to a vehicle now also carries an
