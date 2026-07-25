@@ -133,6 +133,38 @@ def test_overlay_gps_mixed_feeds():
     check(deps[2]["live"] is False, "non-numeric brigade with no vehicle stays non-live")
 
 
+def test_card_install_detection():
+    """Settings.card_installed must reflect the file on disk, not just the env var."""
+    from app.config import load_settings  # noqa: PLC0415 - env is set per-case below
+
+    saved = {k: os.environ.get(k) for k in ("WT_CARD_PATH", "WT_WWW_CREATED")}
+    try:
+        os.environ["WT_CARD_PATH"] = ""
+        check(not load_settings().card_installed, "no card path -> not installed")
+
+        os.environ["WT_CARD_PATH"] = "/nonexistent/warsaw-transport-card.js"
+        check(
+            not load_settings().card_installed,
+            "card path pointing at a missing file -> not installed",
+        )
+
+        os.environ["WT_CARD_PATH"] = os.path.join(
+            ADDON_DIR, "lovelace", "warsaw-transport-card.js"
+        )
+        check(load_settings().card_installed, "card path pointing at a real file -> installed")
+
+        os.environ["WT_WWW_CREATED"] = "true"
+        check(load_settings().www_created, "WT_WWW_CREATED=true is parsed")
+        os.environ["WT_WWW_CREATED"] = "false"
+        check(not load_settings().www_created, "WT_WWW_CREATED=false is parsed")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_lovelace_card_shipped():
     """The card is plain JS with no build step, so just check it ships intact."""
     card_path = os.path.join(ADDON_DIR, "lovelace", "warsaw-transport-card.js")
@@ -155,6 +187,31 @@ def test_lovelace_card_shipped():
     with open(os.path.join(ADDON_DIR, "run.sh"), encoding="utf-8") as fh:
         run_sh = fh.read()
     check("www/warsaw_transport" in run_sh, "run.sh installs the card into the HA www folder")
+    # A directory that merely exists is not the HA config folder: without this
+    # marker check the copy can silently land inside the container.
+    check(
+        "configuration.yaml" in run_sh,
+        "run.sh identifies the HA config folder by configuration.yaml",
+    )
+    check(
+        'if [ -s "${CARD_DEST}" ]' in run_sh,
+        "run.sh verifies the copied card exists on disk before reporting success",
+    )
+    check(
+        "WT_WWW_CREATED" in run_sh,
+        "run.sh reports whether it had to create the www folder",
+    )
+
+    with open(os.path.join(ADDON_DIR, "DOCS.md"), encoding="utf-8") as fh:
+        docs = fh.read()
+    check(
+        "Restart Home Assistant Core once" in docs,
+        "DOCS.md requires the Home Assistant Core restart",
+    )
+    check(
+        "Custom element not found" in docs,
+        "DOCS.md troubleshoots the 404 / missing-element symptom",
+    )
 
     with open(os.path.join(ADDON_DIR, "config.yaml"), encoding="utf-8") as fh:
         config_yaml = fh.read()
@@ -172,4 +229,5 @@ if __name__ == "__main__":
     test_overlay_gps()
     test_overlay_gps_mixed_feeds()
     test_lovelace_card_shipped()
+    test_card_install_detection()
     print("\nAll smoke tests passed.")

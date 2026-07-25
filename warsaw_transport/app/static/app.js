@@ -38,6 +38,71 @@ async function refreshHealth() {
   }
 }
 
+/**
+ * Report whether the dashboard can actually load the card.
+ *
+ * `card_installed` alone is not enough: Home Assistant only starts serving
+ * /local when <config>/www exists at *its* startup, so a freshly installed file
+ * 404s until Core is restarted. This panel is served from the Home Assistant
+ * origin through ingress, so fetching CARD_URL here sees exactly what the
+ * dashboard would see, and the two signals together give an unambiguous verdict.
+ */
+async function refreshCardStatus() {
+  const box = $("#card-status");
+  const details = $("#card-details");
+  let h;
+  try {
+    h = await api("api/health");
+  } catch (e) {
+    box.textContent = "Cannot reach add-on backend.";
+    return;
+  }
+
+  if (!h.card_installed) {
+    details.hidden = true;
+    box.classList.add("error");
+    box.innerHTML =
+      `⚠ The card could not be installed into your Home Assistant config folder` +
+      (h.ha_config_dir ? ` (${h.ha_config_dir}).` : ".") +
+      ` <a href="api/card" download>Download the card</a> and copy it to` +
+      ` <code>&lt;config&gt;/www/warsaw_transport/</code> yourself, then register the` +
+      ` resource URL <code>${h.card_url}</code>.` +
+      ` If you just updated the add-on, rebuild it (⋮ → Rebuild) so the config` +
+      ` folder mapping takes effect.`;
+    return;
+  }
+
+  $("#card-url").value = h.card_url;
+  details.hidden = false;
+
+  // Absolute path on purpose: this must hit Home Assistant's /local, not the
+  // ingress-rewritten add-on path that every other request here uses.
+  let reachable = false;
+  try {
+    const resp = await fetch(h.card_url, { method: "HEAD", cache: "no-store" });
+    reachable = resp.ok;
+  } catch (_) {
+    reachable = false;
+  }
+
+  if (reachable) {
+    box.classList.remove("error");
+    box.innerHTML =
+      `✅ Card installed and reachable. Add it to a dashboard with` +
+      ` <strong>+ Add card → Warsaw Transport</strong>, after registering the` +
+      ` resource URL below under <strong>Settings → Dashboards → ⋮ → Resources</strong>` +
+      ` as a <strong>JavaScript module</strong>.`;
+  } else {
+    box.classList.add("error");
+    box.innerHTML =
+      `⚠ The card file is installed (<code>${h.card_path}</code>) but Home Assistant` +
+      ` is not serving it yet.<br><strong>Restart Home Assistant Core once</strong>` +
+      ` (Settings → System → ⋮ → Restart Home Assistant), then reload this page.` +
+      ` Home Assistant only starts serving <code>/local/</code> when the` +
+      ` <code>www</code> folder already exists at startup, and this add-on created it.`;
+  }
+}
+
 function depRow(d) {
   const live = d.live ? '<span class="live-dot" title="Live GPS position">● live</span>' : "";
   const when = d.minutes <= 0 ? "now" : `${d.minutes} min`;
@@ -157,6 +222,20 @@ document.addEventListener("click", async (ev) => {
 
 $("#search-form").addEventListener("submit", doSearch);
 
+$("#card-copy").addEventListener("click", async (ev) => {
+  const input = $("#card-url");
+  try {
+    await navigator.clipboard.writeText(input.value);
+  } catch (_) {
+    // Clipboard API needs a secure context; selecting the text is a usable
+    // fallback over plain http.
+    input.select();
+  }
+  ev.target.textContent = "Copied";
+  setTimeout(() => { ev.target.textContent = "Copy"; }, 1500);
+});
+
 refreshHealth();
+refreshCardStatus();
 renderSaved();
 setInterval(renderSaved, 30000);

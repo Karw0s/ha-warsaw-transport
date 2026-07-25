@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1
+
+- **Fixed:** the Lovelace card could fail to load with
+  `404 (Not Found)` / `Custom element not found: warsaw-transport-card` even
+  though the file was installed. Home Assistant only serves `/local/` when the
+  `www` folder exists at Core startup, and the add-on creates that folder — so a
+  Home Assistant **Core restart** is required the first time. This is now a
+  documented setup step and the add-on warns about it in its log.
+- The web panel has a new **Dashboard card** section that reports whether the
+  card is installed *and* whether Home Assistant is actually serving it, with the
+  resource URL to copy and the specific fix for whichever is wrong.
+- The card install no longer reports success when it has not written anywhere
+  useful: the config folder is now identified by its `configuration.yaml` rather
+  than by merely existing, and the copy is verified on disk and logged with its
+  resolved path and size.
+- New `GET /api/card` endpoint serves the card for manual installation when the
+  config folder is unavailable.
+
 ## 0.3.0
 
 - New **Warsaw Transport** Lovelace card: one stop per card, laid out like the

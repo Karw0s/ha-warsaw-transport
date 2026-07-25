@@ -9,7 +9,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, load_settings
@@ -105,14 +105,39 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Warsaw Public Transport", lifespan=lifespan)
 
 
+CARD_URL = "/local/warsaw_transport/warsaw-transport-card.js"
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
+    settings = state.settings
     return {
-        "api_key_set": bool(state.settings.api_key),
+        "api_key_set": bool(settings.api_key),
         "mqtt": state.mqtt is not None,
-        "gps_overlay": state.settings.gps_overlay,
+        "gps_overlay": settings.gps_overlay,
         "saved_stops": len(state.store.list_stops()),
+        # Lovelace card install state — the panel pairs this with a fetch of
+        # CARD_URL to tell "not installed" apart from "installed but Home
+        # Assistant is not serving /local yet".
+        "card_installed": settings.card_installed,
+        "card_path": settings.card_path,
+        "card_url": CARD_URL,
+        "card_www_created": settings.www_created,
+        "ha_config_dir": settings.ha_config_dir,
     }
+
+
+@app.get("/api/card")
+async def card_file() -> Any:
+    """Serve the card straight from the add-on, for manual installation."""
+    path = state.settings.card_src
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="card file not bundled")
+    return FileResponse(
+        path,
+        media_type="text/javascript",
+        filename="warsaw-transport-card.js",
+    )
 
 
 @app.get("/api/stops/search")

@@ -111,5 +111,22 @@ button.danger { background: #ef5350; }
 .dep .live-dot { color: var(--live); font-size: 0.75rem; }
 
 .empty { color: var(--muted); font-size: 0.9rem; }
+.empty.error { color: #b3261e; }
+.empty code {
+  background: #eceff1;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.85em;
+  word-break: break-all;
+}
+
+.card-details { margin-top: 12px; }
+.card-details label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.card-details input[readonly] { background: #f7f8fa; }
 .stop-card { flex-direction: column; align-items: stretch; }
 .stop-card .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }

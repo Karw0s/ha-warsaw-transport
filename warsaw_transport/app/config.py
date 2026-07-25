@@ -41,9 +41,20 @@ class Settings:
     host: str
     port: int
 
+    # Lovelace card install, as resolved by run.sh (all empty when developing
+    # outside the add-on, where there is no Home Assistant config folder).
+    ha_config_dir: str
+    card_path: str
+    card_src: str
+    www_created: bool
+
     @property
     def mqtt_enabled(self) -> bool:
         return bool(self.mqtt_host)
+
+    @property
+    def card_installed(self) -> bool:
+        return bool(self.card_path) and os.path.isfile(self.card_path)
 
 
 def load_settings() -> Settings:
@@ -59,4 +70,12 @@ def load_settings() -> Settings:
         mqtt_password=os.environ.get("WT_MQTT_PASSWORD", ""),
         host=os.environ.get("WT_BIND_HOST", "0.0.0.0"),
         port=_get_int("WT_INGRESS_PORT", 8099),
+        ha_config_dir=os.environ.get("WT_HA_CONFIG_DIR", "").strip(),
+        card_path=os.environ.get("WT_CARD_PATH", "").strip(),
+        card_src=os.environ.get(
+            "WT_CARD_SRC",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "lovelace",
+                         "warsaw-transport-card.js"),
+        ).strip(),
+        www_created=_get_bool("WT_WWW_CREATED", False),
     )

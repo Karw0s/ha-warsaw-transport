@@ -26,6 +26,18 @@
       <h2>Your stops</h2>
       <div id="saved-stops" class="saved"></div>
     </section>
+
+    <section class="card">
+      <h2>Dashboard card</h2>
+      <div id="card-status" class="empty">Checking…</div>
+      <div id="card-details" class="card-details" hidden>
+        <label for="card-url">Resource URL</label>
+        <div class="search-row">
+          <input id="card-url" type="text" readonly />
+          <button id="card-copy" type="button" class="secondary">Copy</button>
+        </div>
+      </div>
+    </section>
   </main>
 
   <script src="app.js"></script>
