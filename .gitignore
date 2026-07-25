@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Local runtime data (add-on /data volume when testing locally)
+data/
+*.local.json
+
+# Secrets — never commit an API key
+.env
+secrets.yaml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
