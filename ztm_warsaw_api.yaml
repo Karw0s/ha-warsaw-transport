@@ -1,0 +1,396 @@
+openapi: 3.0.3
+
+info:
+  title: Warsaw Open Data — ZTM public transport API
+  version: "1.0.0"
+  description: |
+    The public-transport (ZTM / Warszawski Transport Publiczny) endpoints of the Warsaw open data
+    portal, as used by this add-on.
+
+    Catalogue: https://dane.um.warszawa.pl/pl/catalogue — API key: https://dane.um.warszawa.pl/pl/key-api
+
+    `https://api.um.warszawa.pl/api/` is **deprecated**; everything here targets
+    `https://dane.um.warszawa.pl/api/`. Endpoints are addressed by *name* (`get_ztm_...`), not by
+    dataset UUID plus a generic `dbtimetable_get` / `busestrams_get` action as on the old host.
+
+    ## Conventions
+
+    - **Every** endpoint is called with `POST`, even the one that takes no parameters.
+    - Parameters go in a JSON request body (`Content-Type: application/json`).
+    - Auth is the `Authorization: <JWT>` request header — **no `Bearer` prefix**. A missing or
+      invalid key gives HTTP 401.
+    - Success is HTTP 200 with a **bare JSON array**; there is no `{"result": ...}` envelope.
+
+    ## Error handling
+
+    Treat "the response body is a JSON array" as the success signal. An error can arrive with
+    HTTP 200 as an object carrying an `error` key, or as a bare string (rate limit, bad parameter),
+    so the HTTP status alone is not enough. See the `ApiError` schema.
+
+    ## Row encodings
+
+    Responses come back in three different shapes, so a client needs a flattener that handles all
+    three:
+
+    | Endpoint | Row shape |
+    |---|---|
+    | `get_ztm_przystanki_komunikacji_miejskiej`, `get_ztm_lista_linii_na_przystanku` | `{"values": [{"key": k, "value": v}, ...]}` |
+    | `get_ztm_odjazdy_linii_z_przystanku` | bare list `[{"key": k, "value": v}, ...]` — no `values` wrapper |
+    | `get_ztm_lokalizacja_pojazdow` | plain object, already flat |
+
+    All scalar values in the pair-encoded endpoints are **strings or `null`** — including
+    coordinates and IDs. Only `get_ztm_lokalizacja_pojazdow` returns real JSON numbers
+    (for `Lat` / `Lon`).
+
+    Ready-to-run requests live in `dane-um-warszawa-requests.http` at the repo root.
+  license:
+    name: Creative Commons Attribution — data © City of Warsaw
+    url: https://creativecommons.org/licenses/by/4.0/
+
+servers:
+  - url: https://dane.um.warszawa.pl
+
+security:
+  - apiKeyAuth: []
+
+tags:
+  - name: stops
+    description: Stop poles and the lines serving them
+  - name: timetables
+    description: Scheduled departures
+  - name: realtime
+    description: Live vehicle positions
+
+paths:
+  /api/action/get_ztm_przystanki_komunikacji_miejskiej:
+    post:
+      tags: [stops]
+      operationId: listStops
+      summary: All stop poles in Warsaw
+      description: |
+        Returns **every** stop pole in the city.
+
+        Takes no parameters — send it with an empty body (`content-length: 0`).
+
+        Gotchas:
+
+        - **No server-side search.** Unlike the old `dbtimetable_get?...&name=` query, this endpoint
+          cannot filter. Download the full list, cache it, and search client-side. Observed size:
+          **6663 rows, ~3 MB** — budget a longer request timeout than for the other endpoints.
+        - **No `kierunek`.** The old stop-search dataset returned a direction descriptor per pole;
+          this one does not. Direction is available per departure from
+          `get_ztm_odjazdy_linii_z_przystanku`.
+        - Names contain Polish diacritics. For accent-insensitive matching, NFKD-normalise and strip
+          combining marks, and additionally map `ł`/`Ł` → `l`/`L` — `ł` is a standalone codepoint
+          that does **not** decompose under NFKD.
+        - The list changes rarely; a 24 h cache is plenty.
+      responses:
+        "200":
+          description: Every stop pole, one row per pole
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StopRow"
+              example:
+                - values:
+                    - {value: "4038", key: zespol}
+                    - {value: "01", key: slupek}
+                    - {value: "Komitetu Obrony Robotników", key: nazwa_zespolu}
+                    - {value: "2307", key: id_ulicy}
+                    - {value: "52.178995", key: szer_geo}
+                    - {value: "20.978165", key: dlug_geo}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/action/get_ztm_lista_linii_na_przystanku:
+    post:
+      tags: [stops]
+      operationId: listLinesAtStop
+      summary: Lines serving one stop pole
+      description: |
+        Lists the line designations that call at a single pole.
+
+        Gotchas:
+
+        - Line values are strings and are not always numeric (`"L-8"`, `"L33"`, `"N44"`) — never
+          coerce to an integer.
+        - The result mixes modes: a pole may be served by both buses and trams, so a GPS overlay
+          driven by these lines needs **both** vehicle feeds (`type: 1` and `type: 2`).
+        - There is no single call returning all departures at a pole — feed each `linia` into
+          `get_ztm_odjazdy_linii_z_przystanku`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopPoleRequest"
+            example: {busstopId: "5070", busstopNr: "03"}
+      responses:
+        "200":
+          description: One row per line calling at the pole
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LineRow"
+              example:
+                - values: [{value: "24", key: linia}]
+                - values: [{value: "20", key: linia}]
+                - values: [{value: "28", key: linia}]
+                - values: [{value: "76", key: linia}]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/action/get_ztm_odjazdy_linii_z_przystanku:
+    post:
+      tags: [timetables]
+      operationId: getTimetable
+      summary: Today's timetable for one line at one pole
+      description: |
+        Scheduled departures of a single line from a single pole, for the **current day only**.
+
+        Gotchas:
+
+        - **Rows have no `values` wrapper.** Each row is a bare list of `{key, value}` pairs — this
+          differs from every other pair-encoded endpoint.
+        - **Hours can exceed 24.** After-midnight service is expressed as `"25:14:00"`, meaning
+          01:14 the next day. Parse as `divmod(hour, 24)` → day offset + hour.
+        - **Rows are not sorted by time** — an observed sample returned 12:06, 17:21, 13:36,
+          12:36 … — sort client-side.
+        - **Today only.** There is no date parameter; lines that do not run today return an empty
+          array.
+        - `brygada` values are strings and may be non-numeric (`"M1"` occurs in the GPS feed) —
+          compare as trimmed strings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TimetableRequest"
+            example: {busstopId: "5070", busstopNr: "03", line: "20"}
+      responses:
+        "200":
+          description: One row per scheduled departure; empty when the line does not run today
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimetableRow"
+              example:
+                - - {value: null, key: symbol_2}
+                  - {value: null, key: symbol_1}
+                  - {value: "3", key: brygada}
+                  - {value: "Żerań FSO", key: kierunek}
+                  - {value: "TO-FSOpOko", key: trasa}
+                  - {value: "12:06:00", key: czas}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/action/get_ztm_lokalizacja_pojazdow:
+    post:
+      tags: [realtime]
+      operationId: getVehiclePositions
+      summary: Live GPS positions of buses or trams
+      description: |
+        Real-time positions of every vehicle of one type that is currently reporting. Rows are
+        already flat — this is the only endpoint without the key/value pair encoding, and the only
+        one returning real JSON numbers.
+
+        Gotchas:
+
+        - **No `line` parameter.** The old `busestrams_get` accepted one; this endpoint does not.
+          Every call returns all vehicles of the requested type (observed: **1159 vehicles, ~180 KB**
+          for `type: 1`) — fetch one snapshot, cache it for ~10 s (roughly the GPS refresh rate),
+          and filter locally rather than calling once per line.
+        - **One type per call.** Covering a stop served by both buses and trams needs two calls.
+        - **Stale fixes exist.** Some vehicles report a `Time` days or months old (a `2024-12-02`
+          fix appeared in a 2026 snapshot). Check `Time` freshness before trusting a position.
+        - `Brigade` is not always numeric — join it to `brygada` as a trimmed string.
+        - `(Lines, Brigade)` identifies the *trip*; `VehicleNumber` identifies the physical vehicle.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VehiclePositionsRequest"
+            example: {type: 1}
+      responses:
+        "200":
+          description: One object per reporting vehicle
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Vehicle"
+              example:
+                - {Brigade: "4", Lines: "119", Lat: 52.199493, Lon: 21.118981, Time: "2026-07-25 17:12:33", VehicleNumber: "1000"}
+                - {Brigade: "2", Lines: "119", Lat: 52.2080173, Lon: 21.1336676, Time: "2026-07-25 17:12:32", VehicleNumber: "1001"}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        The API key from https://dane.um.warszawa.pl/pl/key-api, sent raw — **without** a `Bearer`
+        prefix.
+
+  responses:
+    Unauthorized:
+      description: The `Authorization` header is missing or the key is invalid
+
+  schemas:
+    KeyValuePair:
+      type: object
+      description: |
+        One field of a row. Serialised as `{"value": ..., "key": ...}` (value first); key order is
+        irrelevant when parsing, but it differs from the old host's output. Every value is a string
+        or `null` — including coordinates and IDs.
+      properties:
+        key:
+          type: string
+          description: Field name
+          example: zespol
+        value:
+          type: string
+          nullable: true
+          description: Field value, always a string or null
+          example: "4038"
+
+    ValuesRow:
+      type: object
+      description: A row wrapped in a `values` list of key/value pairs.
+      properties:
+        values:
+          type: array
+          items:
+            $ref: "#/components/schemas/KeyValuePair"
+
+    StopRow:
+      allOf:
+        - $ref: "#/components/schemas/ValuesRow"
+      description: |
+        One stop pole. Keys present in `values`:
+
+        | Key | Meaning |
+        |---|---|
+        | `zespol` | Stop-group ID — the `busstopId` for the other endpoints |
+        | `slupek` | Pole number within the group, zero-padded (`"01"`) — the `busstopNr` |
+        | `nazwa_zespolu` | Stop-group name, e.g. `"PKP Służewiec"` |
+        | `id_ulicy` | Street ID |
+        | `szer_geo` | Latitude, as a string |
+        | `dlug_geo` | Longitude, as a string |
+
+        A stop group (`zespol`) has several poles (`slupek`); the pair `(zespol, slupek)` identifies
+        one physical stop.
+
+    LineRow:
+      allOf:
+        - $ref: "#/components/schemas/ValuesRow"
+      description: |
+        One line calling at the pole — a single pair with key `linia`, whose value is the line
+        designation as a **string**: numeric (`"20"`), lettered (`"L-8"`, `"L33"`) or night
+        (`"N44"`).
+
+    TimetableRow:
+      type: array
+      description: |
+        One scheduled departure, as a **bare list** of key/value pairs (no `values` wrapper). Keys:
+
+        | Key | Meaning |
+        |---|---|
+        | `czas` | Departure time, `HH:MM:SS`; the hour may exceed 24 (`"25:14:00"` = 01:14 next day) |
+        | `kierunek` | Destination / direction of this trip |
+        | `brygada` | Brigade (vehicle duty) number — join key against `Brigade` in the GPS feed |
+        | `trasa` | Internal route code, e.g. `"TO-FSOpOko"` |
+        | `symbol_1` | Timetable footnote symbol; usually `null` |
+        | `symbol_2` | Timetable footnote symbol; usually `null` |
+      items:
+        $ref: "#/components/schemas/KeyValuePair"
+
+    Vehicle:
+      type: object
+      description: A vehicle's most recent GPS fix. Already flat — no key/value pair encoding.
+      properties:
+        Lat:
+          type: number
+          format: double
+          description: Latitude (WGS84)
+          example: 52.2445033
+        Lon:
+          type: number
+          format: double
+          description: Longitude (WGS84)
+          example: 21.0017201
+        Time:
+          type: string
+          description: GPS fix timestamp, `YYYY-MM-DD HH:MM:SS`, local Warsaw time. May be stale.
+          example: "2026-07-25 17:12:46"
+        Lines:
+          type: string
+          description: Line designation — matches `linia` / `line` elsewhere
+          example: "190"
+        Brigade:
+          type: string
+          description: Brigade number — matches `brygada` on timetable rows; not always numeric
+          example: "4"
+        VehicleNumber:
+          type: string
+          description: Fleet number of the physical vehicle
+          example: "9950"
+
+    StopPoleRequest:
+      type: object
+      required: [busstopId, busstopNr]
+      properties:
+        busstopId:
+          type: string
+          description: Stop-group ID (`zespol` from the stops endpoint)
+          example: "5070"
+        busstopNr:
+          type: string
+          description: Pole number (`slupek`), zero-padded string — `"03"`, not `3`
+          example: "03"
+
+    TimetableRequest:
+      allOf:
+        - $ref: "#/components/schemas/StopPoleRequest"
+        - type: object
+          required: [line]
+          properties:
+            line:
+              type: string
+              description: Line designation as a string, from `get_ztm_lista_linii_na_przystanku`
+              example: "20"
+
+    VehiclePositionsRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: integer
+          enum: [1, 2]
+          description: Vehicle type — **1 = bus, 2 = tram**
+          example: 1
+
+    ApiError:
+      description: |
+        Not a real response schema: errors are **not** signalled by the HTTP status alone. A failed
+        call can return HTTP 200 whose body is an object with an `error` key, or a bare string such
+        as a rate-limit or bad-parameter message. Any body that is not a JSON array is a failure.
+      oneOf:
+        - type: object
+          properties:
+            error:
+              type: string
+              example: "Błędna metoda lub parametry wywołania"
+        - type: string
+          example: "Nieprawidłowy apikey lub jego brak"
