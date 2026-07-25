@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+- Migrated to the `dane.um.warszawa.pl` API; `api.um.warszawa.pl` is deprecated.
+  Existing API keys keep working — no action needed beyond updating the add-on.
+- **Breaking:** removed the `vehicle_type` option. The GPS overlay now checks the
+  bus *and* tram feeds, so stops served by both get live data.
+- Stop search runs locally against a cached copy of the city stop list (the new
+  API has no server-side search). The cache is kept on `/data` and refreshed
+  daily, so it survives restarts. Accent-insensitive: `zeran` finds `Żerań`.
+- Live vehicle positions are fetched once per refresh cycle and shared by all
+  saved stops instead of once per line.
+- Removed the stop-level `direction` field (search results, the stop sensor
+  attribute, and the sensor's friendly name) — the new stops endpoint does not
+  provide one. Each departure still carries its own destination.
+
 ## 0.1.0
 
 - Initial release.

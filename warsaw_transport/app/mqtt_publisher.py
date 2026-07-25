@@ -66,10 +66,8 @@ class MqttPublisher:
     def publish_discovery(self, stop: dict[str, Any]) -> None:
         stop_id = stop["id"]
         name = stop.get("name") or stop_id
-        direction = stop.get("direction")
-        friendly = f"{name} → {direction}" if direction else name
         payload = {
-            "name": friendly,
+            "name": name,
             "unique_id": f"{NODE}_{stop_id}",
             "object_id": f"warsaw_{stop_id}",
             "state_topic": self._state_topic(stop_id),
@@ -94,7 +92,6 @@ class MqttPublisher:
         )
         attributes = {
             "stop_name": stop.get("name"),
-            "direction": stop.get("direction"),
             "busstop_id": stop.get("busstop_id"),
             "pole": stop.get("pole"),
             "departures": departures,

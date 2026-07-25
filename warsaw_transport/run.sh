@@ -9,11 +9,10 @@ set -e
 export WT_API_KEY="$(bashio::config 'api_key')"
 export WT_POLL_INTERVAL="$(bashio::config 'poll_interval')"
 export WT_GPS_OVERLAY="$(bashio::config 'gps_overlay')"
-export WT_VEHICLE_TYPE="$(bashio::config 'vehicle_type')"
 export WT_LOG_LEVEL="$(bashio::config 'log_level')"
 
 if bashio::config.is_empty 'api_key'; then
-    bashio::log.warning "No API key set. Open the add-on configuration and paste your api.um.warszawa.pl key."
+    bashio::log.warning "No API key set. Open the add-on configuration and paste your dane.um.warszawa.pl key."
 fi
 
 # MQTT credentials — prefer the broker offered by the Supervisor (mqtt:want).

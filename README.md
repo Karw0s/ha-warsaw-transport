@@ -5,7 +5,7 @@ dashboard. Pick bus/tram stops in the add-on's web panel and each one is publish
 Home Assistant as a sensor (via MQTT Discovery) showing the **next 5 departures** relative
 to the current time, using scheduled timetables augmented with a **live GPS overlay**.
 
-Data source: [Warsaw Open Data API](https://api.um.warszawa.pl/) (Zarząd Transportu
+Data source: [Warsaw Open Data API](https://dane.um.warszawa.pl/) (Zarząd Transportu
 Miejskiego). An API key is required — see the add-on docs.
 
 ## Installation
@@ -26,7 +26,7 @@ Miejskiego). An API key is required — see the add-on docs.
 - A Home Assistant install that supports add-ons (Home Assistant OS or Supervised).
 - The **Mosquitto broker** add-on (or any MQTT broker configured in HA) — departures are
   published via MQTT Discovery.
-- A free API key from <https://api.um.warszawa.pl/>.
+- A free API key from <https://dane.um.warszawa.pl/pl/key-api>.
 
 ## What's in this repo
 
@@ -36,6 +36,8 @@ Miejskiego). An API key is required — see the add-on docs.
 | `warsaw_transport/` | The add-on itself (Docker container + FastAPI app). |
 | `warsaw_transport/DOCS.md` | End-user setup and dashboard-card documentation. |
 | `scripts/smoke.py` | Offline unit checks for the parsing/merge logic. |
+| `.claude/docs/` | Reference notes on the dane.um.warszawa.pl API endpoints. |
+| `dane-um-warszawa-requests.http` | Ready-to-run requests for all four endpoints. |
 
 ## License
 

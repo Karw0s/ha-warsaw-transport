@@ -13,6 +13,7 @@ data/
 # Secrets — never commit an API key
 .env
 secrets.yaml
+*.private.env.json
 
 # OS / editor
 .DS_Store

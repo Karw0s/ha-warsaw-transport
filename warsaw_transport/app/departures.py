@@ -15,6 +15,10 @@ from .warsaw_api import WarsawApiClient, WarsawApiError
 
 log = logging.getLogger("warsaw_transport.departures")
 
+# The GPS endpoint takes one vehicle type per call (1 = bus, 2 = tram) and has
+# no line filter, so both feeds are fetched wholesale; the client caches them.
+VEHICLE_TYPES = (1, 2)
+
 
 def parse_czas(czas: str, now: datetime) -> datetime | None:
     """Parse a 'HH:MM:SS' departure time into a concrete datetime near `now`.
@@ -100,7 +104,7 @@ async def next_departures(
     *,
     limit: int = 5,
     gps_overlay: bool = True,
-    vehicle_type: int = 1,
+    vehicle_types: tuple[int, ...] = VEHICLE_TYPES,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Full pipeline: fetch lines, fetch all timetables, merge, overlay GPS."""
@@ -125,15 +129,18 @@ async def next_departures(
 
     if gps_overlay and departures:
         try:
-            # One call per involved line, then flatten.
-            involved = {d["line"] for d in departures}
+            # One (cached) snapshot per vehicle type, then flatten. A pole can
+            # be served by both buses and trams, so both feeds are needed.
             vehicle_lists = await asyncio.gather(
-                *(client.vehicle_positions(vehicle_type, line) for line in involved),
+                *(client.vehicle_positions(t) for t in vehicle_types),
                 return_exceptions=True,
             )
             vehicles: list[dict[str, Any]] = []
-            for vl in vehicle_lists:
+            for vehicle_type, vl in zip(vehicle_types, vehicle_lists):
                 if isinstance(vl, Exception):
+                    log.warning(
+                        "GPS feed for type %s unavailable: %s", vehicle_type, vl
+                    )
                     continue
                 vehicles.extend(vl)
             overlay_gps(departures, vehicles)

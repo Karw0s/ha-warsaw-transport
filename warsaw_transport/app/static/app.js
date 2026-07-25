@@ -70,7 +70,7 @@ async function renderSaved() {
       <div class="header">
         <div class="info">
           <div class="name">${s.name || s.id}</div>
-          <div class="sub">${s.direction ? "→ " + s.direction + " · " : ""}stop ${s.busstop_id}/${s.pole}</div>
+          <div class="sub">stop ${s.busstop_id}/${s.pole}</div>
         </div>
         <button class="danger" data-remove="${s.id}">Remove</button>
       </div>
@@ -119,7 +119,6 @@ async function doSearch(ev) {
     row.innerHTML = `
       <div class="info">
         <div class="name">${r.name || ""} <span class="sub">(${r.busstop_id}/${r.pole})</span></div>
-        <div class="sub">${r.direction ? "→ " + r.direction : ""}</div>
       </div>
       <button class="secondary">Add</button>`;
     row.querySelector("button").addEventListener("click", async () => {
@@ -130,7 +129,6 @@ async function doSearch(ev) {
             busstop_id: r.busstop_id,
             pole: r.pole,
             name: r.name,
-            direction: r.direction,
           }),
         });
         box.innerHTML = "";

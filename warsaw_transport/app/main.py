@@ -42,7 +42,6 @@ async def compute_and_publish(stop: dict[str, Any]) -> list[dict[str, Any]]:
         stop["pole"],
         limit=5,
         gps_overlay=state.settings.gps_overlay,
-        vehicle_type=state.settings.vehicle_type_code,
     )
     if state.mqtt is not None:
         state.mqtt.publish_state(stop, departures)
@@ -72,7 +71,7 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     state.settings = settings
-    state.client = WarsawApiClient(settings.api_key)
+    state.client = WarsawApiClient(settings.api_key, cache_dir=settings.data_dir)
     state.store = StopStore(settings.data_dir)
 
     if settings.mqtt_enabled:
@@ -112,7 +111,6 @@ async def health() -> dict[str, Any]:
         "api_key_set": bool(state.settings.api_key),
         "mqtt": state.mqtt is not None,
         "gps_overlay": state.settings.gps_overlay,
-        "vehicle_type": state.settings.vehicle_type,
         "saved_stops": len(state.store.list_stops()),
     }
 
@@ -128,7 +126,6 @@ async def search_stops(name: str = Query(..., min_length=2)) -> Any:
             "busstop_id": r.get("zespol"),
             "pole": r.get("slupek"),
             "name": r.get("nazwa_zespolu"),
-            "direction": r.get("kierunek"),
             "lat": r.get("szer_geo"),
             "lon": r.get("dlug_geo"),
         }
@@ -152,7 +149,6 @@ async def add_stop(payload: dict[str, Any]) -> Any:
         busstop_id,
         pole,
         payload.get("name", f"{busstop_id}/{pole}"),
-        payload.get("direction", ""),
     )
     if state.mqtt is not None:
         state.mqtt.publish_discovery(stop)
@@ -184,7 +180,6 @@ async def departures_for(stop_id: str) -> Any:
             stop["pole"],
             limit=5,
             gps_overlay=state.settings.gps_overlay,
-            vehicle_type=state.settings.vehicle_type_code,
         )
     except WarsawApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

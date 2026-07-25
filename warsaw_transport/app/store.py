@@ -53,16 +53,13 @@ class StopStore:
         with self._lock:
             return self._stops.get(stop_id)
 
-    def add(
-        self, busstop_id: str, pole: str, name: str, direction: str = ""
-    ) -> dict[str, Any]:
+    def add(self, busstop_id: str, pole: str, name: str) -> dict[str, Any]:
         stop_id = _slug(busstop_id, pole)
         entry = {
             "id": stop_id,
             "busstop_id": str(busstop_id),
             "pole": str(pole),
             "name": name,
-            "direction": direction,
         }
         with self._lock:
             self._stops[stop_id] = entry

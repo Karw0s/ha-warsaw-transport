@@ -28,7 +28,6 @@ class Settings:
     api_key: str
     poll_interval: int
     gps_overlay: bool
-    vehicle_type: str  # "bus" or "tram"
     log_level: str
     data_dir: str
 
@@ -46,18 +45,12 @@ class Settings:
     def mqtt_enabled(self) -> bool:
         return bool(self.mqtt_host)
 
-    @property
-    def vehicle_type_code(self) -> int:
-        """Warsaw GPS API type code: 1 = bus, 2 = tram."""
-        return 2 if self.vehicle_type == "tram" else 1
-
 
 def load_settings() -> Settings:
     return Settings(
         api_key=os.environ.get("WT_API_KEY", "").strip(),
         poll_interval=max(10, _get_int("WT_POLL_INTERVAL", 30)),
         gps_overlay=_get_bool("WT_GPS_OVERLAY", True),
-        vehicle_type=os.environ.get("WT_VEHICLE_TYPE", "bus").strip().lower(),
         log_level=os.environ.get("WT_LOG_LEVEL", "info").strip().lower(),
         data_dir=os.environ.get("WT_DATA_DIR", "/data"),
         mqtt_host=os.environ.get("WT_MQTT_HOST", "").strip(),
