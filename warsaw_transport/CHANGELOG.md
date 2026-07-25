@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.0
+
+- **Fixed:** the add-on re-downloaded every timetable on every poll. Timetables
+  and stop line lists are published once a day, but were refetched every 30
+  seconds — a stop served by five lines cost six API calls per cycle. They are
+  now cached for the service day, so a warm cycle costs **two calls in total, no
+  matter how many stops you track**. For a single five-line stop that is ~2,880
+  timetable requests a day down to ~12.
+- The live GPS feeds (bus and tram) are fetched **once per cycle and shared by
+  every tracked stop**, instead of once per stop.
+- Timetables are cached in `/data/timetable_cache.json` and reused across
+  restarts and add-on updates. The service day rolls over at 04:00 rather than
+  midnight, so after-midnight departures (expressed as hours ≥ 24, e.g. `25:14`)
+  are not dropped as the clock passes midnight.
+- Every API request that reaches the network is now logged with its parameters,
+  so calls can be told apart in the log — including bus vs tram GPS feeds:
+
+  ```
+  api vehicles[bus] type=1 -> 200 in 41ms, 1832 row(s)
+  api timetable busstopId=7009 busstopNr=01 line=190 -> 200 in 34ms, 42 row(s)
+  Poll sweep: 2 stop(s), 2 API call(s) in 0.1s.
+  ```
+
+  Each cycle ends with a summary of how many calls it cost, and startup reports
+  whether the day's timetables were reused or fetched fresh. Set
+  `log_level: debug` to also see cache hits.
+- Two new environment-variable knobs (no add-on option; they rarely need
+  changing): `WT_TIMETABLE_TTL` (default 12 h) and `WT_VEHICLES_TTL` (defaults to
+  the poll interval, capped at 20 s).
+
 ## 0.3.1
 
 - **Fixed:** the Lovelace card could fail to load with

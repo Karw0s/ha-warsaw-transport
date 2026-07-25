@@ -31,6 +31,12 @@ class Settings:
     log_level: str
     data_dir: str
 
+    # Cache lifetimes, in seconds. Timetables are published once a day, so they
+    # are refetched at most twice a day (and always after the service-day
+    # rollover); the GPS feed is shared by every stop within one poll sweep.
+    timetable_ttl: int
+    vehicles_ttl: int
+
     # MQTT
     mqtt_host: str
     mqtt_port: int
@@ -58,12 +64,18 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    poll_interval = max(10, _get_int("WT_POLL_INTERVAL", 30))
     return Settings(
         api_key=os.environ.get("WT_API_KEY", "").strip(),
-        poll_interval=max(10, _get_int("WT_POLL_INTERVAL", 30)),
+        poll_interval=poll_interval,
         gps_overlay=_get_bool("WT_GPS_OVERLAY", True),
         log_level=os.environ.get("WT_LOG_LEVEL", "info").strip().lower(),
         data_dir=os.environ.get("WT_DATA_DIR", "/data"),
+        timetable_ttl=max(300, _get_int("WT_TIMETABLE_TTL", 12 * 3600)),
+        # Capped at the poll interval so the shared snapshot is never staler
+        # than the sweep that uses it; it exists to let the web panel reuse the
+        # poller's download rather than to throttle the poller.
+        vehicles_ttl=max(5, _get_int("WT_VEHICLES_TTL", min(20, poll_interval))),
         mqtt_host=os.environ.get("WT_MQTT_HOST", "").strip(),
         mqtt_port=_get_int("WT_MQTT_PORT", 1883),
         mqtt_user=os.environ.get("WT_MQTT_USER", "").strip(),
