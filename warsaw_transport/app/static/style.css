@@ -109,6 +109,7 @@ button.danger { background: #ef5350; }
 .dep .dir { flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dep .when { font-weight: 600; }
 .dep .eta { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+.dep .away { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
 .dep .live-dot { color: var(--live); font-size: 0.75rem; }
 
 .empty { color: var(--muted); font-size: 0.9rem; }

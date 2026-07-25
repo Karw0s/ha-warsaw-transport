@@ -7,12 +7,21 @@
 set -e
 
 export WT_API_KEY="$(bashio::config 'api_key')"
+export WT_LEGACY_API_KEY="$(bashio::config 'legacy_api_key')"
 export WT_POLL_INTERVAL="$(bashio::config 'poll_interval')"
 export WT_GPS_OVERLAY="$(bashio::config 'gps_overlay')"
 export WT_LOG_LEVEL="$(bashio::config 'log_level')"
 
 if bashio::config.is_empty 'api_key'; then
     bashio::log.warning "No API key set. Open the add-on configuration and paste your dane.um.warszawa.pl key."
+fi
+
+# Route plans sharpen the arrival estimates but are only published on the old
+# host, which issues its own keys — so this one is optional and the add-on works
+# without it.
+if bashio::config.is_empty 'legacy_api_key'; then
+    bashio::log.info "No legacy_api_key set: arrival estimates use straight-line distance."
+    bashio::log.info "Add an api.um.warszawa.pl key to estimate along the vehicle's route instead."
 fi
 
 # MQTT credentials — prefer the broker offered by the Supervisor (mqtt:want).

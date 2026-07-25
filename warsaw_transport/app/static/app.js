@@ -32,6 +32,15 @@ async function refreshHealth() {
     if (!h.api_key_set) bits.push("⚠ no API key set");
     bits.push(h.mqtt ? "MQTT connected" : "⚠ MQTT off");
     bits.push(`${h.saved_stops} stop(s)`);
+    // Route plans are optional, so say which way arrivals are being estimated.
+    const routes = h.routes || {};
+    if (!routes.enabled) {
+        bits.push("ETA: straight-line");
+    } else if (routes.routes) {
+        bits.push(`ETA: routes (${routes.routes})`);
+    } else {
+        bits.push("⚠ route plans not loaded");
+    }
     setStatus(bits.join(" · "), !h.api_key_set);
   } catch (e) {
     setStatus("Cannot reach add-on backend", true);
@@ -112,8 +121,12 @@ function depRow(d) {
     d.delay_minutes === null || d.delay_minutes === undefined
       ? ""
       : ` (${d.delay_minutes > 0 ? "+" : ""}${d.delay_minutes})`;
+  const away =
+    d.stops_away === null || d.stops_away === undefined
+      ? ""
+      : ` <span class="away">${d.stops_away === 1 ? "next stop" : `${d.stops_away} stops`}</span>`;
   const eta = d.eta_time
-    ? `<span class="eta" title="Estimated arrival">→ ${d.eta_source === "approx" ? "~" : ""}${d.eta_time}${delay}</span>`
+    ? `<span class="eta" title="Estimated arrival${d.eta_source === "route" ? " (measured along the route)" : ""}">→ ${d.eta_source === "approx" ? "~" : ""}${d.eta_time}${delay}</span>${away}`
     : "";
   return `<div class="dep">
     <span class="line">${d.line}</span>

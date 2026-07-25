@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from .eta import VehicleTracker, blank_eta, fix_age, is_live, parse_fix_time
 from .warsaw_api import WarsawApiClient
@@ -66,6 +66,9 @@ def build_departures(
                     "line": str(line),
                     "direction": row.get("kierunek", ""),
                     "brigade": str(row.get("brygada", "")).strip(),
+                    # Route variant code, e.g. "TO-FSOpOko" — the join into the
+                    # route plans that let the ETA measure along the route.
+                    "route": str(row.get("trasa", "")).strip(),
                     "time": dep.strftime("%H:%M"),
                     "timestamp": dep.isoformat(),
                     "minutes": max(0, minutes),
@@ -111,6 +114,7 @@ def overlay_gps(
     stop_location: tuple[float, float] | None = None,
     tracker: VehicleTracker | None = None,
     stop_key: str = "",
+    route_track_for: Callable[[str, str], Any] | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Attach live position — and, when possible, an ETA — to departures.
@@ -122,6 +126,8 @@ def overlay_gps(
 
     An ETA needs the stop's coordinates and a `tracker` to hold the vehicle's
     position history across polls; with either missing, only `live` is set.
+    `route_track_for(line, route_code)` optionally supplies the trip's route
+    geometry, which upgrades the estimate from straight-line to along-the-route.
     """
     now = now or datetime.now()
     index = index_vehicles(vehicles, now)
@@ -142,6 +148,11 @@ def overlay_gps(
 
         if tracker is not None and stop_location is not None:
             scheduled = parse_timestamp(dep.get("timestamp"))
+            route_track = (
+                route_track_for(dep["line"], dep.get("route", ""))
+                if route_track_for is not None
+                else None
+            )
             dep.update(
                 tracker.estimate(
                     stop_key,
@@ -150,6 +161,7 @@ def overlay_gps(
                     v,
                     scheduled=scheduled,
                     now=now,
+                    route_track=route_track,
                 )
             )
     return departures
@@ -200,6 +212,7 @@ async def next_departures(
     vehicles: list[dict[str, Any]] | None = None,
     stop_location: tuple[float, float] | None = None,
     tracker: VehicleTracker | None = None,
+    route_track_for: Callable[[str, str], Any] | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Full pipeline: fetch lines, fetch all timetables, merge, overlay GPS.
@@ -240,6 +253,7 @@ async def next_departures(
             stop_location=stop_location,
             tracker=tracker,
             stop_key=f"{busstop_id}|{pole}",
+            route_track_for=route_track_for,
             now=now,
         )
 

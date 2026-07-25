@@ -22,6 +22,16 @@ from app.departures import (  # noqa: E402
     parse_czas,
 )
 from app.eta import VehicleTracker, haversine_m, is_live, parse_fix_time  # noqa: E402
+from app.routes import (  # noqa: E402
+    MAX_ROUTE_RESIDUAL_M,
+    NullRoutesProvider,
+    RouteCatalog,
+    build_provider,
+    build_track,
+    dump_routes,
+    load_routes,
+    normalize_routes,
+)
 from app.warsaw_api import (  # noqa: E402
     EP_LINES,
     EP_STOPS,
@@ -434,6 +444,266 @@ def test_overlay_ignores_stale_vehicles():
     check(deps[0]["live"] is False, "a vehicle reporting a months-old fix is not live")
 
 
+# --- route plans -----------------------------------------------------------
+#
+# `odleglosc` is the distance from the PREVIOUS stop, not from the start of the
+# route as the published spec claims: in the live catalogue every route's first
+# stop is 0, only 36% of variants are non-decreasing, and reading it cumulatively
+# would make 44% of segments negative. Checked against stop coordinates each
+# value is ~1.04x the straight line to the previous pole. The adapter therefore
+# sums it, and these tests pin that down.
+
+LEGACY_SAMPLE = {
+    "result": {
+        "1": {
+            "TD-3BAN": {
+                # Deliberately out of order, and with odleglosc in both the
+                # string form the spec promises and the int form actually sent.
+                "2": {"nr_zespolu": "3240", "nr_przystanku": "04", "typ": "5",
+                      "odleglosc": "245"},
+                "0": {"nr_zespolu": "R-03", "nr_przystanku": "00", "typ": "6",
+                      "odleglosc": 0},
+                "3": {"nr_zespolu": "3239", "nr_przystanku": "04", "typ": "1",
+                      "odleglosc": 833},
+                "1": {"nr_zespolu": "3241", "nr_przystanku": "02", "typ": "1",
+                      "odleglosc": 400},
+            }
+        }
+    }
+}
+
+
+def _straight_route(count=10, spacing=500.0):
+    """A synthetic line of `count` stops running due north, `spacing` apart."""
+    payload = {
+        "190": {
+            "TO-TEST": {
+                str(i): {
+                    "nr_zespolu": f"70{i:02d}", "nr_przystanku": "01",
+                    "typ": "1", "odleglosc": 0 if i == 0 else spacing,
+                }
+                for i in range(count)
+            }
+        }
+    }
+    routes = normalize_routes(payload)
+    locate = {
+        (f"70{i:02d}", "01"): (STOP_LAT + (i * spacing) / METRES_PER_DEGREE_LAT, STOP_LON)
+        for i in range(count)
+    }
+    return routes[("190", "TO-TEST")], locate
+
+
+def _route_vehicle(metres, fix_time, line="190", brigade="2"):
+    """A vehicle `metres` along the synthetic route."""
+    return {
+        "Lines": line, "Brigade": brigade,
+        "Lat": STOP_LAT + metres / METRES_PER_DEGREE_LAT, "Lon": STOP_LON,
+        "VehicleNumber": "1234",
+        "Time": fix_time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def test_normalize_routes():
+    catalogue = normalize_routes(LEGACY_SAMPLE)
+    check(list(catalogue) == [("1", "TD-3BAN")], "route keyed by (line, route code)")
+    route = catalogue[("1", "TD-3BAN")]
+    check([s.order for s in route.stops] == [0, 1, 2, 3], "stops sorted by numeric order")
+    check(
+        [s.distance_m for s in route.stops] == [0.0, 400.0, 645.0, 1478.0],
+        f"per-segment odleglosc summed into cumulative: {[s.distance_m for s in route.stops]}",
+    )
+    check(route.stops[2].segment_m == 245.0, "odleglosc sent as a string is parsed")
+    check(route.length_m == 1478.0, "route length is the last cumulative value")
+    check(route.stops[0].zespol == "R-03", "technical stops are kept, not dropped")
+    check(route.index_of("3239", "04") == 3, "pole lookup finds its position")
+    check(route.index_of("3239", "4") == 3, "pole lookup ignores zero padding")
+    check(route.index_of("9999", "01") is None, "a pole not on the route is None")
+
+    bare = normalize_routes(LEGACY_SAMPLE["result"])
+    check(bare == catalogue, "the bare payload parses the same as the result envelope")
+
+
+def test_routes_cache_roundtrip():
+    catalogue = normalize_routes(LEGACY_SAMPLE)
+    check(load_routes(dump_routes(catalogue)) == catalogue, "catalogue survives the cache encoding")
+    check(load_routes("nonsense") == {}, "an unusable cache payload yields no routes")
+
+
+def test_routes_provider_selection():
+    check(build_provider("").name == "disabled", "no legacy key -> no provider")
+    check(isinstance(build_provider(""), NullRoutesProvider), "the null provider is used")
+    check(build_provider("secret").name == "legacy", "a legacy key selects the legacy provider")
+    check(not RouteCatalog(build_provider("")).enabled, "catalogue reports itself disabled")
+    check(
+        run(RouteCatalog(build_provider("")).ensure()) == {},
+        "a disabled catalogue fetches nothing",
+    )
+
+
+def test_route_projection():
+    route, locate = _straight_route()
+    track = build_track(route, "7008", "01", locate)
+    check(track is not None, "track built for a stop on the route")
+    check(track.target_index == 8 and track.target_m == 4000.0, "target stop located on the route")
+    check(build_track(route, "9999", "01", locate) is None, "no track for a stop off the route")
+
+    # Exactly on a stop, and half way between two.
+    at_stop = track.project(STOP_LAT + 2000 / METRES_PER_DEGREE_LAT, STOP_LON)
+    check(abs(at_stop.distance_m - 2000) < 1, f"projection at a stop: {at_stop.distance_m:.0f} m")
+    between = track.project(STOP_LAT + 2250 / METRES_PER_DEGREE_LAT, STOP_LON)
+    check(
+        abs(between.distance_m - 2250) < 1,
+        f"projection interpolates within a segment: {between.distance_m:.0f} m",
+    )
+    check(between.residual_m < 5, "a vehicle on the line has a small residual")
+    check(track.stops_between(4) == 4, "stops still to serve before ours")
+
+    # A vehicle well off the route (1 km to the side) must not be placed on it.
+    aside = track.project(
+        STOP_LAT + 2000 / METRES_PER_DEGREE_LAT,
+        STOP_LON + 1000 / (METRES_PER_DEGREE_LAT * 0.61),
+    )
+    check(aside is None, f"a vehicle {MAX_ROUTE_RESIDUAL_M:.0f} m+ off the route is rejected")
+
+
+def test_route_projection_on_a_loop():
+    """An out-and-back route passes the same points twice; progress must not snap back."""
+    # Out to 2000 m and back again, so every position has two candidate segments.
+    payload = {"190": {"TO-LOOP": {}}}
+    outward = [0, 500, 1000, 1500, 2000]
+    positions = outward + [1500, 1000, 500, 0]
+    for i, metres in enumerate(positions):
+        payload["190"]["TO-LOOP"][str(i)] = {
+            "nr_zespolu": f"80{i:02d}", "nr_przystanku": "01", "typ": "1",
+            "odleglosc": 0 if i == 0 else abs(metres - positions[i - 1]),
+        }
+    route = normalize_routes(payload)[("190", "TO-LOOP")]
+    locate = {
+        (f"80{i:02d}", "01"): (STOP_LAT + m / METRES_PER_DEGREE_LAT, STOP_LON)
+        for i, m in enumerate(positions)
+    }
+    # Our stop is the one on the *return* leg, 1000 m out (index 6).
+    track = build_track(route, "8006", "01", locate)
+    check(track.target_index == 6, "target is the return-leg stop")
+
+    # 1500 m out lies on both legs; only the hint says which one the vehicle is on.
+    here = STOP_LAT + 1500 / METRES_PER_DEGREE_LAT
+    outbound = track.project(here, STOP_LON, 2)
+    check(outbound.index < 4, f"with an outbound hint it stays outbound: index {outbound.index}")
+    inbound = track.project(here, STOP_LON, 5)
+    check(inbound.index >= 4, f"with a return hint it stays on the return leg: {inbound.index}")
+    check(
+        inbound.distance_m > outbound.distance_m,
+        "the return leg is further along the route than the outbound one",
+    )
+    check(
+        track.stops_between(outbound.index) > track.stops_between(inbound.index),
+        "and therefore has more stops still to serve before ours",
+    )
+
+
+def test_route_eta_is_stable():
+    """The payoff: a steady vehicle should hold one arrival time across polls."""
+    route, locate = _straight_route()
+    track = build_track(route, "7008", "01", locate)
+    tracker = VehicleTracker()
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    scheduled = t0 + timedelta(minutes=7)
+    target_lat = STOP_LAT + 4000 / METRES_PER_DEGREE_LAT
+
+    seen = []
+    for step in range(6):
+        t = t0 + timedelta(seconds=60 * step)
+        seen.append(
+            tracker.estimate(
+                STOP_KEY, target_lat, STOP_LON, _route_vehicle(1000 + 500 * step, t),
+                scheduled=scheduled, now=t, route_track=track,
+            )
+        )
+
+    check(seen[0]["eta_source"] == "approx", "a first sighting still has no measured speed")
+    # Sitting exactly at stop 2, it has *reached* that stop, so six remain.
+    check(
+        seen[0]["route_distance_m"] == 3000 and seen[0]["stops_away"] == 6,
+        f"route distance and stop count reported: {seen[0]['route_distance_m']} m, "
+        f"{seen[0]['stops_away']} stops",
+    )
+    check(all(s["eta_source"] == "route" for s in seen[1:]), "later polls measure along the route")
+    times = {s["eta_time"] for s in seen[1:]}
+    check(len(times) == 1, f"the arrival time holds steady across polls: {times}")
+    check(
+        [s["stops_away"] for s in seen] == [6, 5, 4, 3, 2, 1],
+        f"stops away counts down: {[s['stops_away'] for s in seen]}",
+    )
+    check(seen[-1]["route_distance_m"] == 500, "route distance counts down to the stop")
+
+
+def test_route_eta_uses_passage_times():
+    """Speed comes from when the vehicle reached earlier stops, dwell included."""
+    route, locate = _straight_route()
+    track = build_track(route, "7008", "01", locate)
+    tracker = VehicleTracker()
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    target_lat = STOP_LAT + 4000 / METRES_PER_DEGREE_LAT
+
+    # One stop (500 m) every 100 s, i.e. 5 m/s including the time spent at them.
+    for step in range(4):
+        t = t0 + timedelta(seconds=100 * step)
+        result = tracker.estimate(
+            STOP_KEY, target_lat, STOP_LON, _route_vehicle(500 * step, t), now=t,
+            route_track=track,
+        )
+    # 4 stops covered, 2500 m to go at 5 m/s = 500 s.
+    check(result["eta_source"] == "route", "passage timing yields a route-measured speed")
+    check(
+        abs(result["eta_minutes"] - 8) <= 1,
+        f"ETA from passage speed is ~8 min, got {result['eta_minutes']}",
+    )
+
+
+def test_route_eta_detects_a_passed_stop():
+    route, locate = _straight_route()
+    track = build_track(route, "7002", "01", locate)  # our stop is 1000 m in
+    tracker = VehicleTracker()
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    target_lat = STOP_LAT + 1000 / METRES_PER_DEGREE_LAT
+
+    tracker.estimate(STOP_KEY, target_lat, STOP_LON, _route_vehicle(500, t0), now=t0,
+                     route_track=track)
+    t1 = t0 + timedelta(seconds=60)
+    gone = tracker.estimate(
+        STOP_KEY, target_lat, STOP_LON, _route_vehicle(2500, t1), now=t1, route_track=track
+    )
+    check(gone["eta_minutes"] is None, "no ETA once the trip is beyond our stop")
+    check(gone["eta_status"] == "passed", "the reason is reported")
+
+
+def test_route_eta_falls_back_off_route():
+    """A vehicle not on this route keeps the straight-line estimate."""
+    route, locate = _straight_route()
+    track = build_track(route, "7008", "01", locate)
+    tracker = VehicleTracker()
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    target_lat = STOP_LAT + 4000 / METRES_PER_DEGREE_LAT
+
+    # 3 km to the east of the route: far outside the residual limit.
+    def aside(metres, t):
+        v = _route_vehicle(metres, t)
+        v["Lon"] = STOP_LON + 0.05
+        return v
+
+    first = tracker.estimate(STOP_KEY, target_lat, STOP_LON, aside(2000, t0), now=t0,
+                             route_track=track)
+    check(first["route_distance_m"] is None, "no route measurement for an off-route vehicle")
+    check(first["eta_status"] == "ok", "it still gets a straight-line estimate")
+    t1 = t0 + timedelta(seconds=60)
+    second = tracker.estimate(STOP_KEY, target_lat, STOP_LON, aside(2600, t1), now=t1,
+                              route_track=track)
+    check(second["eta_source"] == "tracked", "the fallback is the straight-line measurement")
+    check(second["stops_away"] is None, "no stop count without a route")
+
+
 def test_stop_coordinate_lookup():
     row = {"zespol": "7009", "slupek": "01", "szer_geo": "52.219450", "dlug_geo": "21.011280"}
     check(stop_coords(row) == (52.21945, 21.01128), "stop coordinates parse from strings")
@@ -752,6 +1022,15 @@ if __name__ == "__main__":
     test_eta_rejects_unusable_fixes()
     test_eta_at_the_stop()
     test_tracker_prune()
+    test_normalize_routes()
+    test_routes_cache_roundtrip()
+    test_routes_provider_selection()
+    test_route_projection()
+    test_route_projection_on_a_loop()
+    test_route_eta_is_stable()
+    test_route_eta_uses_passage_times()
+    test_route_eta_detects_a_passed_stop()
+    test_route_eta_falls_back_off_route()
     test_overlay_adds_eta()
     test_overlay_claims_only_the_next_run()
     test_overlay_ignores_stale_vehicles()

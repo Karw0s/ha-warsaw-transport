@@ -26,6 +26,11 @@ def _get_int(name: str, default: int) -> int:
 @dataclass
 class Settings:
     api_key: str
+    # Route plans still live on the deprecated api.um.warszawa.pl host, which
+    # issues its own keys. Optional: without it the ETA falls back to measuring
+    # in a straight line. See app/routes.py.
+    legacy_api_key: str
+    legacy_api_base: str
     poll_interval: int
     gps_overlay: bool
     log_level: str
@@ -59,6 +64,10 @@ class Settings:
         return bool(self.mqtt_host)
 
     @property
+    def routes_enabled(self) -> bool:
+        return bool(self.legacy_api_key)
+
+    @property
     def card_installed(self) -> bool:
         return bool(self.card_path) and os.path.isfile(self.card_path)
 
@@ -67,6 +76,10 @@ def load_settings() -> Settings:
     poll_interval = max(10, _get_int("WT_POLL_INTERVAL", 30))
     return Settings(
         api_key=os.environ.get("WT_API_KEY", "").strip(),
+        legacy_api_key=os.environ.get("WT_LEGACY_API_KEY", "").strip(),
+        legacy_api_base=os.environ.get(
+            "WT_LEGACY_API_BASE", "https://api.um.warszawa.pl/api/action"
+        ).strip(),
         poll_interval=poll_interval,
         gps_overlay=_get_bool("WT_GPS_OVERLAY", True),
         log_level=os.environ.get("WT_LOG_LEVEL", "info").strip().lower(),

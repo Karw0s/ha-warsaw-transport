@@ -6,11 +6,12 @@ Home Assistant as a sensor (via MQTT Discovery) showing the **next 5 departures*
 to the current time, using scheduled timetables augmented with a **live GPS overlay**.
 
 When a departure is matched to a vehicle that is on its way, the add-on also estimates
-**when it will actually arrive** — from how fast the vehicle's distance to your stop is
-closing between polls, since the API publishes positions only. The estimate sits next to
-the scheduled time with its delay (`14:05 → 14:07 +2`), and is withheld rather than guessed
-when the positions cannot support one; see
-[`warsaw_transport/DOCS.md`](warsaw_transport/DOCS.md) §5.1.
+**when it will actually arrive**, since the API publishes positions only. Given an optional
+second API key it measures **along the route the vehicle is driving** — the stops it has
+still to serve and how long it took over the ones behind it; otherwise it falls back to how
+fast the straight-line gap is closing. The estimate sits next to the scheduled time with its
+delay (`14:05 → 14:07 +2`), and is withheld rather than guessed when the positions cannot
+support one; see [`warsaw_transport/DOCS.md`](warsaw_transport/DOCS.md) §3.1 and §5.1.
 
 It also ships a **custom Lovelace card** that puts a stop on your dashboard in the style of
 the built-in weather card — the next departure as a big countdown, the four after it in a
@@ -51,6 +52,7 @@ actually changes is refetched:
 | `get_ztm_lista_linii_na_przystanku` (lines at a pole) | Once per stop per service day. |
 | `get_ztm_odjazdy_linii_z_przystanku` (timetable) | Once per stop+line per service day (the API publishes it daily). |
 | `get_ztm_przystanki_komunikacji_miejskiej` (stop list) | Once a day, on demand when searching. |
+| `public_transport_routes` (route plans, legacy host) | Once a day, only when `legacy_api_key` is set. |
 
 Timetables are cached in `/data/timetable_cache.json` and reused across restarts. The
 service day rolls over at 04:00 rather than midnight, so after-midnight departures
@@ -73,6 +75,7 @@ variables (no add-on option, they rarely need changing):
 |---|---|---|
 | `WT_TIMETABLE_TTL` | `43200` (12 h) | Seconds before a cached timetable/line list is refreshed. Entries always expire at the service-day rollover regardless. |
 | `WT_VEHICLES_TTL` | `poll_interval`, capped at 20 | Seconds a GPS snapshot is shared between the poller and the web panel. |
+| `WT_LEGACY_API_BASE` | `https://api.um.warszawa.pl/api/action` | Host serving the route plans; override to point at a replacement. |
 
 ## What's in this repo
 

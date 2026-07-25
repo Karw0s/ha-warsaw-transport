@@ -11,7 +11,7 @@
 // Plain custom elements, no framework and no build step, matching app/static/.
 "use strict";
 
-const CARD_VERSION = "0.5.0";
+const CARD_VERSION = "0.6.0";
 
 const DEFAULTS = {
   icon: "mdi:bus",
@@ -68,17 +68,28 @@ function formatMinutes(minutes) {
  * Both `eta_time` and `delay_minutes` are absolute (a clock time and a
  * difference between two clock times), so unlike the countdown they do not need
  * recomputing as the browser sits idle — they only get *older*, by at most one
- * add-on poll. `eta_source: "approx"` marks an estimate made from a single GPS
- * fix, before a real speed could be measured; it is shown with a "~".
+ * add-on poll. `eta_source` says how it was measured: "route" along the trip's
+ * own route plan (best), "tracked" from the straight-line gap closing, and
+ * "approx" from a single GPS fix before a real speed was available — the last
+ * of those is shown with a "~".
  */
 function eta(departure) {
   if (!departure.eta_time) return null;
   const delay = Number(departure.delay_minutes);
+  const away = Number(departure.stops_away);
   return {
     time: `${departure.eta_source === "approx" ? "~" : ""}${departure.eta_time}`,
     approx: departure.eta_source === "approx",
+    routed: departure.eta_source === "route",
     delay: Number.isFinite(delay) ? delay : null,
+    stopsAway: Number.isFinite(away) ? away : null,
   };
+}
+
+function formatStopsAway(stops) {
+  if (stops === null) return "";
+  if (stops <= 0) return "at the stop";
+  return stops === 1 ? "next stop" : `${stops} stops away`;
 }
 
 // Late is the case worth noticing, so it gets the warning colour; on time and
@@ -156,6 +167,11 @@ const STYLES = `
   .hero .at {
     font-size: 0.85rem;
     color: var(--secondary-text-color);
+  }
+  .hero .away {
+    font-size: 0.8rem;
+    color: var(--secondary-text-color);
+    opacity: 0.85;
   }
 
   .line {
@@ -311,6 +327,8 @@ class WarsawTransportCard extends HTMLElement {
       ? ` <span class="eta" title="${esc(
           estimate.approx
             ? "Rough estimate from a single GPS fix"
+            : estimate.routed
+            ? "Estimated arrival, measured along the vehicle's route"
             : "Estimated arrival, from the vehicle's GPS position"
         )}">→ ${esc(estimate.time)}</span>`
       : "";
@@ -321,6 +339,12 @@ class WarsawTransportCard extends HTMLElement {
           )}">${esc(formatDelay(estimate.delay))}</span>`
         : "";
     const unit = minutes !== null && minutes > 0 ? `<span class="unit">min</span>` : "";
+    // Only route-measured estimates know the stop count; it is the clearest
+    // signal that the vehicle is genuinely on its way here.
+    const away =
+      estimate && estimate.stopsAway !== null
+        ? `<div class="away">${esc(formatStopsAway(estimate.stopsAway))}</div>`
+        : "";
     return `<div class="hero">
         <span class="line big-badge">${esc(departure.line)}</span>
         <div class="detail">
@@ -328,6 +352,7 @@ class WarsawTransportCard extends HTMLElement {
           <div class="at">${esc(departure.time)}${arrival}${
             live ? ` · ${live}${chip}` : ""
           }</div>
+          ${away}
         </div>
         <div class="big">${formatMinutes(minutes)}${unit}</div>
       </div>`;
