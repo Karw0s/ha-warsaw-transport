@@ -106,10 +106,20 @@ async function refreshCardStatus() {
 function depRow(d) {
   const live = d.live ? '<span class="live-dot" title="Live GPS position">● live</span>' : "";
   const when = d.minutes <= 0 ? "now" : `${d.minutes} min`;
+  // Arrival estimate from the vehicle's GPS, shown next to the scheduled time.
+  // "~" marks an estimate made before a speed could be measured.
+  const delay =
+    d.delay_minutes === null || d.delay_minutes === undefined
+      ? ""
+      : ` (${d.delay_minutes > 0 ? "+" : ""}${d.delay_minutes})`;
+  const eta = d.eta_time
+    ? `<span class="eta" title="Estimated arrival">→ ${d.eta_source === "approx" ? "~" : ""}${d.eta_time}${delay}</span>`
+    : "";
   return `<div class="dep">
     <span class="line">${d.line}</span>
     <span class="dir">${d.direction || ""}</span>
     <span class="when">${d.time} · ${when}</span>
+    ${eta}
     ${live}
   </div>`;
 }
@@ -194,6 +204,10 @@ async function doSearch(ev) {
             busstop_id: r.busstop_id,
             pole: r.pole,
             name: r.name,
+            // Kept with the stop so the ETA can measure distance to it without
+            // re-reading the (3 MB) city stop list.
+            lat: r.lat,
+            lon: r.lon,
           }),
         });
         box.innerHTML = "";

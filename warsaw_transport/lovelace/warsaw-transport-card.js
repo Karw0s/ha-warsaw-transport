@@ -11,7 +11,7 @@
 // Plain custom elements, no framework and no build step, matching app/static/.
 "use strict";
 
-const CARD_VERSION = "0.3.0";
+const CARD_VERSION = "0.5.0";
 
 const DEFAULTS = {
   icon: "mdi:bus",
@@ -60,6 +60,38 @@ function minutesUntil(departure, now) {
 function formatMinutes(minutes) {
   if (minutes === null) return "—";
   return minutes <= 0 ? "now" : String(minutes);
+}
+
+/**
+ * The add-on's arrival estimate for a departure, or null when there is none.
+ *
+ * Both `eta_time` and `delay_minutes` are absolute (a clock time and a
+ * difference between two clock times), so unlike the countdown they do not need
+ * recomputing as the browser sits idle — they only get *older*, by at most one
+ * add-on poll. `eta_source: "approx"` marks an estimate made from a single GPS
+ * fix, before a real speed could be measured; it is shown with a "~".
+ */
+function eta(departure) {
+  if (!departure.eta_time) return null;
+  const delay = Number(departure.delay_minutes);
+  return {
+    time: `${departure.eta_source === "approx" ? "~" : ""}${departure.eta_time}`,
+    approx: departure.eta_source === "approx",
+    delay: Number.isFinite(delay) ? delay : null,
+  };
+}
+
+// Late is the case worth noticing, so it gets the warning colour; on time and
+// early stay green, matching the live marker.
+function delayClass(delay) {
+  if (delay === null || delay === 0) return "ontime";
+  return delay > 0 ? "late" : "early";
+}
+
+function formatDelay(delay) {
+  if (delay === null) return "";
+  if (delay === 0) return "on time";
+  return delay > 0 ? `+${delay}` : String(delay);
 }
 
 const STYLES = `
@@ -147,6 +179,19 @@ const STYLES = `
     font-size: 0.75rem;
     white-space: nowrap;
   }
+
+  .eta {
+    color: var(--primary-text-color);
+    white-space: nowrap;
+  }
+  .delay {
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .delay.late { color: var(--warning-color, #ff9800); }
+  .delay.early,
+  .delay.ontime { color: var(--success-color, #2e7d32); }
 
   .upcoming {
     display: grid;
@@ -250,8 +295,11 @@ class WarsawTransportCard extends HTMLElement {
       </div>`;
   }
 
+  // The countdown stays on the timetable; the live estimate sits next to the
+  // scheduled clock time as "14:05 → ~14:07", with the delay as a chip.
   _renderHero(departure, now) {
     const minutes = minutesUntil(departure, now);
+    const estimate = eta(departure);
     const live = departure.live
       ? `<span class="live" title="${esc(
           departure.vehicle
@@ -259,12 +307,27 @@ class WarsawTransportCard extends HTMLElement {
             : "Live GPS position"
         )}">● live</span>`
       : "";
+    const arrival = estimate
+      ? ` <span class="eta" title="${esc(
+          estimate.approx
+            ? "Rough estimate from a single GPS fix"
+            : "Estimated arrival, from the vehicle's GPS position"
+        )}">→ ${esc(estimate.time)}</span>`
+      : "";
+    const chip =
+      estimate && estimate.delay !== null
+        ? ` <span class="delay ${delayClass(estimate.delay)}" title="${esc(
+            "Estimated arrival vs the timetable"
+          )}">${esc(formatDelay(estimate.delay))}</span>`
+        : "";
     const unit = minutes !== null && minutes > 0 ? `<span class="unit">min</span>` : "";
     return `<div class="hero">
         <span class="line big-badge">${esc(departure.line)}</span>
         <div class="detail">
           <div class="dir">${esc(departure.direction)}</div>
-          <div class="at">${esc(departure.time)}${live ? ` · ${live}` : ""}</div>
+          <div class="at">${esc(departure.time)}${arrival}${
+            live ? ` · ${live}${chip}` : ""
+          }</div>
         </div>
         <div class="big">${formatMinutes(minutes)}${unit}</div>
       </div>`;
@@ -275,12 +338,27 @@ class WarsawTransportCard extends HTMLElement {
       .map((d) => {
         const minutes = minutesUntil(d, now);
         const suffix = minutes !== null && minutes > 0 ? " min" : "";
+        const estimate = eta(d);
+        // A slot has no room for a second clock time, so the estimate shows as
+        // its difference from the schedule next to the live dot.
+        const marker = d.live
+          ? `<span class="live" title="${esc(
+              estimate
+                ? `Estimated arrival ${estimate.time}`
+                : "Live GPS position"
+            )}">●${
+              estimate && estimate.delay !== null
+                ? ` <span class="delay ${delayClass(estimate.delay)}">${esc(
+                    formatDelay(estimate.delay)
+                  )}</span>`
+                : ""
+            }</span>`
+          : "";
         return `<div class="slot">
             <span class="line">${esc(d.line)}</span>
             <span class="at">${esc(d.time)}</span>
-            <span class="in">${formatMinutes(minutes)}${suffix}${
-              d.live ? ` <span class="live" title="Live GPS position">●</span>` : ""
-            }</span>
+            <span class="in">${formatMinutes(minutes)}${suffix}</span>
+            ${marker}
           </div>`;
       })
       .join("");

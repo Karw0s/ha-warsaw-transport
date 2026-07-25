@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.0
+
+- **Live arrival estimates.** A departure matched to a vehicle now also carries an
+  estimated arrival time and its delay against the timetable, shown on the card
+  next to the scheduled time (`14:05 → 14:07`, with a `+2` chip) and in the
+  add-on's web panel. The estimate comes from how fast the vehicle's distance to
+  your stop is shrinking between polls, so traffic and detours are reflected
+  without needing route geometry the API does not publish.
+- The estimate is deliberately withheld rather than guessed when the positions do
+  not support one — a vehicle heading away from the stop (the same brigade runs
+  back and forth all day), one parked mid-run, or one laying over at a terminus
+  long before its departure. Those keep the plain **● live** marker, as before.
+  A vehicle only just spotted shows a rough figure marked with `~` until a second
+  GPS fix gives a real speed, about one poll later.
+- The sensor **state is unchanged** — still minutes to the next *scheduled*
+  departure, so existing automations keep working. The estimate is available in
+  the attributes: `next_eta_minutes`, and per departure `eta_time`,
+  `eta_minutes`, `delay_minutes`, `eta_source`, `eta_status`, `distance_m`.
+- A departure is now flagged `live` only while its vehicle's GPS fix is recent.
+  The feed contains fixes days or months old, which previously lit up departures
+  no vehicle was actually running.
+- A vehicle is matched to the **soonest** departure of its line and brigade only.
+  Brigades repeat through the day, so a bus visible now also lit up its run two
+  hours later.
+- Stops added from the panel now store their coordinates (needed to measure the
+  distance to the vehicle); stops added earlier are filled in automatically from
+  the cached city stop list, at no extra API cost.
+- No new API calls: the estimate is computed from the GPS snapshot the add-on
+  already fetches once per cycle.
+
 ## 0.4.0
 
 - **Fixed:** the add-on re-downloaded every timetable on every poll. Timetables

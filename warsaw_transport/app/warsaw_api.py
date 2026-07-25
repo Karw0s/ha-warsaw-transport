@@ -114,6 +114,22 @@ def normalize(text: Any) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
+def stop_coords(row: dict[str, Any]) -> tuple[float, float] | None:
+    """Read (lat, lon) off a stop row; the API sends both as strings."""
+    try:
+        return float(row["szer_geo"]), float(row["dlug_geo"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def pole_variants(pole: str) -> tuple[str, ...]:
+    """Spellings of a pole number to try — the API zero-pads it ("01")."""
+    raw = str(pole).strip()
+    padded = raw.zfill(2)
+    stripped = raw.lstrip("0") or raw
+    return tuple(dict.fromkeys((raw, padded, stripped)))
+
+
 def match_stops(rows: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
     """Filter stop rows whose group name contains `name`, ignoring diacritics.
 
@@ -146,6 +162,10 @@ class WarsawApiClient:
         self._stops: list[dict[str, Any]] = []
         self._stops_at = 0.0
         self._stops_lock = asyncio.Lock()
+        # (zespol, slupek) -> row, built on demand and rebuilt when the stop list
+        # is refreshed; -1.0 can never equal a real _stops_at timestamp.
+        self._stop_index: dict[tuple[str, str], dict[str, Any]] = {}
+        self._stop_index_at = -1.0
 
         self._vehicles: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         self._vehicles_lock = asyncio.Lock()
@@ -317,6 +337,33 @@ class WarsawApiClient:
         """
         rows = await self._ensure_stops()
         return match_stops(rows, name)[:MAX_SEARCH_RESULTS]
+
+    async def stop_location(
+        self, busstop_id: str, pole: str
+    ) -> tuple[float, float] | None:
+        """Coordinates of one stop pole, from the cached city stop list.
+
+        Needed by the ETA (distance from vehicle to stop). Stops saved through
+        the panel carry their own coordinates; this is the fallback for ones
+        saved before that, and it costs no request unless the stop cache is cold.
+        """
+        rows = await self._ensure_stops()
+        if self._stop_index_at != self._stops_at:
+            self._stop_index = {
+                (
+                    str(r.get("zespol", "")).strip(),
+                    str(r.get("slupek", "")).strip(),
+                ): r
+                for r in rows
+            }
+            self._stop_index_at = self._stops_at
+
+        group = str(busstop_id).strip()
+        for variant in pole_variants(pole):
+            row = self._stop_index.get((group, variant))
+            if row is not None:
+                return stop_coords(row)
+        return None
 
     # --- lines & timetables ------------------------------------------------
 

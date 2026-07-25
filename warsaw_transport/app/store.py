@@ -53,7 +53,15 @@ class StopStore:
         with self._lock:
             return self._stops.get(stop_id)
 
-    def add(self, busstop_id: str, pole: str, name: str) -> dict[str, Any]:
+    def add(
+        self,
+        busstop_id: str,
+        pole: str,
+        name: str,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> dict[str, Any]:
+        """Save a stop. Coordinates are optional and only used for the ETA."""
         stop_id = _slug(busstop_id, pole)
         entry = {
             "id": stop_id,
@@ -61,10 +69,25 @@ class StopStore:
             "pole": str(pole),
             "name": name,
         }
+        if lat is not None and lon is not None:
+            entry["lat"], entry["lon"] = lat, lon
         with self._lock:
             self._stops[stop_id] = entry
             self._save()
         return entry
+
+    def set_location(self, stop_id: str, lat: float, lon: float) -> None:
+        """Backfill coordinates for a stop saved before they were stored.
+
+        Mutates the live entry, so callers holding it see the new values and the
+        lookup happens once per stop rather than once per poll.
+        """
+        with self._lock:
+            entry = self._stops.get(stop_id)
+            if entry is None or (entry.get("lat") == lat and entry.get("lon") == lon):
+                return
+            entry["lat"], entry["lon"] = lat, lon
+            self._save()
 
     def remove(self, stop_id: str) -> bool:
         with self._lock:
