@@ -9,7 +9,7 @@ import os
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 ADDON_DIR = os.path.join(os.path.dirname(__file__), "..", "warsaw_transport")
 sys.path.insert(0, ADDON_DIR)
@@ -21,6 +21,7 @@ from app.departures import (  # noqa: E402
     overlay_gps,
     parse_czas,
 )
+from app.eta import VehicleTracker, haversine_m, is_live, parse_fix_time  # noqa: E402
 from app.warsaw_api import (  # noqa: E402
     EP_LINES,
     EP_STOPS,
@@ -30,6 +31,8 @@ from app.warsaw_api import (  # noqa: E402
     describe_call,
     match_stops,
     normalize,
+    pole_variants,
+    stop_coords,
 )
 
 
@@ -127,6 +130,10 @@ def test_build_departures():
     check(times == ["14:05", "14:10", "14:40", "01:14"], f"merged+sorted times: {times}")
     check(deps[0]["minutes"] == 5, "minutes computed for first departure")
     check(all(d["live"] is False for d in deps), "no live flag before overlay")
+    check(
+        all(d["eta_minutes"] is None and d["delay_minutes"] is None for d in deps),
+        "ETA fields are present but empty before the GPS overlay",
+    )
 
 
 def test_overlay_gps():
@@ -155,6 +162,285 @@ def test_overlay_gps_mixed_feeds():
     check(deps[0]["live"] is True and deps[0]["lat"] == 52.3, "tram departure matched from tram feed")
     check(deps[1]["live"] is True and deps[1]["lat"] == 52.2, "bus departure matched from bus feed")
     check(deps[2]["live"] is False, "non-numeric brigade with no vehicle stays non-live")
+
+
+# --- live arrival estimates ------------------------------------------------
+
+STOP_LAT, STOP_LON = 52.2, 21.0
+STOP_KEY = "7009|01"
+# One degree of latitude is ~111.2 km, so this converts metres into a position
+# due north of the stop without needing a second real-world coordinate.
+METRES_PER_DEGREE_LAT = 111_194.9
+
+
+def _vehicle(metres_away, fix_time, line="190", brigade="2"):
+    """A GPS row for a vehicle `metres_away` due north of the test stop."""
+    return {
+        "Lines": line,
+        "Brigade": brigade,
+        "Lat": STOP_LAT + metres_away / METRES_PER_DEGREE_LAT,
+        "Lon": STOP_LON,
+        "VehicleNumber": "1234",
+        "Time": fix_time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def test_haversine():
+    north = STOP_LAT + 1000 / METRES_PER_DEGREE_LAT
+    d = haversine_m(STOP_LAT, STOP_LON, north, STOP_LON)
+    check(abs(d - 1000) < 2, f"1 km due north measures as 1 km (got {d:.1f} m)")
+    check(haversine_m(STOP_LAT, STOP_LON, STOP_LAT, STOP_LON) == 0.0, "same point is 0 m")
+
+    # Metro Politechnika to Metro Centrum is ~1.5 km along Marszałkowska.
+    real = haversine_m(52.21945, 21.01128, 52.23096, 21.01180)
+    check(1200 < real < 1400, f"two real Warsaw stops are ~1.3 km apart (got {real:.0f} m)")
+
+
+def test_parse_fix_time():
+    check(
+        parse_fix_time("2026-07-25 17:12:33") == datetime(2026, 7, 25, 17, 12, 33),
+        "parse the vehicle Time format",
+    )
+    check(parse_fix_time("") is None, "empty fix time is rejected")
+    check(parse_fix_time("nonsense") is None, "unparseable fix time is rejected")
+
+
+def test_is_live_needs_a_recent_fix():
+    now = datetime(2026, 7, 25, 14, 0, 0)
+    check(is_live(_vehicle(500, now), now), "a fresh fix counts as live")
+    check(
+        is_live(_vehicle(500, now - timedelta(seconds=90)), now),
+        "a fix from a minute or two ago still counts as live",
+    )
+    check(
+        not is_live(_vehicle(500, datetime(2024, 12, 2, 9, 0)), now),
+        "a fix from a previous year is not live",
+    )
+    check(is_live({"Lines": "190", "Brigade": "2"}, now), "a missing fix time stays live")
+
+
+def test_eta_from_closing_distance():
+    """Two fixes give a real closing speed; one gives only a rough guess."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+
+    first = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(1000, t0), now=t0)
+    check(first["eta_source"] == "approx", "a first sighting is only an approximation")
+    check(first["distance_m"] == 1000, f"distance to the stop is reported: {first['distance_m']}")
+    # 1000 m * 1.3 detour / 5 m/s (18 km/h) = 260 s.
+    check(first["eta_minutes"] == 4, f"default-speed ETA is ~4 min, got {first['eta_minutes']}")
+
+    t1 = t0 + timedelta(seconds=60)
+    scheduled = t1 + timedelta(seconds=60)
+    second = tracker.estimate(
+        STOP_KEY, STOP_LAT, STOP_LON, _vehicle(700, t1), scheduled=scheduled, now=t1
+    )
+    # Closed 300 m in 60 s = 5 m/s, so 700 m remain -> 140 s.
+    check(second["eta_source"] == "tracked", "a second fix yields a measured closing speed")
+    check(second["eta_minutes"] == 2, f"tracked ETA is 2 min, got {second['eta_minutes']}")
+    check(second["eta_time"] == "14:03", f"arrival clock time, got {second['eta_time']}")
+    check(second["delay_minutes"] == 1, f"1 min behind schedule, got {second['delay_minutes']}")
+    check(second["eta_status"] == "ok", "a usable estimate reports status ok")
+
+
+def test_eta_ignores_a_repeated_fix():
+    """The GPS snapshot is cached, so the same fix is offered on several polls."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    same = _vehicle(1000, t0)
+
+    tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, same, now=t0)
+    again = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, same, now=t0 + timedelta(seconds=20))
+    check(
+        again["eta_source"] == "approx",
+        "re-offering one fix does not invent a speed (would divide by zero elapsed time)",
+    )
+
+    later = tracker.estimate(
+        STOP_KEY, STOP_LAT, STOP_LON, _vehicle(400, t0 + timedelta(seconds=60)),
+        now=t0 + timedelta(seconds=60),
+    )
+    check(later["eta_source"] == "tracked", "a genuinely new fix does measure the speed")
+
+
+def test_eta_suppressed_when_moving_away():
+    """(line, brigade) is a trip: the same brigade runs back the other way."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(400, t0), now=t0)
+    t1 = t0 + timedelta(seconds=60)
+    away = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(1400, t1), now=t1)
+    check(away["eta_minutes"] is None, "a receding vehicle gets no ETA")
+    check(away["eta_status"] == "moving_away", "the reason is reported")
+
+
+def test_eta_withheld_for_a_parked_vehicle():
+    """Seen at a terminus: distance unchanged for minutes, never seen moving."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    parked = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(2400, t0), now=t0)
+    check(parked["eta_source"] == "approx", "a first sighting is still a rough guess")
+
+    t1 = t0 + timedelta(seconds=60)
+    still = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(2400, t1), now=t1)
+    check(still["eta_minutes"] is None, "a vehicle that has not moved gets no ETA")
+    check(still["eta_status"] == "stalled", "the reason is reported")
+
+
+def test_eta_survives_a_stop_at_a_light():
+    """A vehicle that *was* moving keeps its ETA while it waits at a light."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(1000, t0), now=t0)
+    t1 = t0 + timedelta(seconds=60)
+    moving = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(700, t1), now=t1)
+    check(moving["eta_minutes"] == 2, f"closing 300 m/min from 700 m out: 2 min")
+
+    # Then it stops dead for five minutes. Having been seen moving, it keeps an
+    # ETA (unlike the parked case above); the estimate degrades as it sits, but
+    # the speed floor keeps it bounded instead of running off to an hour.
+    for step in range(2, 8):
+        t = t0 + timedelta(seconds=60 * step)
+        dwell = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(700, t), now=t)
+    check(dwell["eta_source"] == "tracked", "the last measured speed carries over")
+    check(
+        2 <= dwell["eta_minutes"] <= 10,
+        f"a long dwell worsens the ETA but keeps it bounded: {dwell['eta_minutes']} min",
+    )
+
+
+def test_moving_away_does_not_flap():
+    """A receding vehicle must stay receding, not reset to a default guess."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(100, t0), now=t0)
+    t1 = t0 + timedelta(seconds=60)
+    first = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(600, t1), now=t1)
+    t2 = t1 + timedelta(seconds=60)
+    second = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(900, t2), now=t2)
+    check(first["eta_status"] == "moving_away", "the departing vehicle is spotted")
+    check(second["eta_status"] == "moving_away", "and is still spotted on the next poll")
+
+
+def test_eta_withheld_for_a_layover():
+    """A vehicle sitting at the stop 40 min before its run is not 'arriving now'."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    result = tracker.estimate(
+        STOP_KEY, STOP_LAT, STOP_LON, _vehicle(40, t0),
+        scheduled=t0 + timedelta(minutes=44), now=t0,
+    )
+    check(result["eta_minutes"] is None, "no ETA 44 min ahead of the timetable")
+    check(result["eta_status"] == "waiting", "the reason is reported")
+
+    soon = tracker.estimate(
+        STOP_KEY, STOP_LAT, STOP_LON, _vehicle(40, t0),
+        scheduled=t0 + timedelta(minutes=2), now=t0,
+    )
+    check(soon["eta_minutes"] == 0, "a vehicle at the stop just before its run arrives now")
+
+
+def test_eta_rejects_unusable_fixes():
+    now = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+
+    stale = tracker.estimate(
+        STOP_KEY, STOP_LAT, STOP_LON, _vehicle(500, datetime(2024, 12, 2, 9, 0)), now=now
+    )
+    check(stale["eta_status"] == "stale_fix", "a months-old fix produces no ETA")
+
+    far = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(30_000, now), now=now)
+    check(far["eta_status"] == "too_far", "a vehicle 30 km away produces no ETA")
+
+    nowhere = tracker.estimate(
+        STOP_KEY, STOP_LAT, STOP_LON, {"Lines": "190", "Brigade": "2"}, now=now
+    )
+    check(nowhere["eta_status"] == "no_position", "a row without coordinates produces no ETA")
+
+
+def test_eta_at_the_stop():
+    now = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    arrived = tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(50, now), now=now)
+    check(arrived["eta_minutes"] == 0, "a vehicle at the stop arrives now")
+
+
+def test_tracker_prune():
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+    tracker.estimate(STOP_KEY, STOP_LAT, STOP_LON, _vehicle(500, t0), now=t0)
+    check(tracker.prune(t0 + timedelta(minutes=5)) == 0, "a recent track is kept")
+    check(tracker.prune(t0 + timedelta(hours=2)) == 1, "an idle track is forgotten")
+    check(tracker._samples == {} and tracker._speed == {}, "pruning clears the history")
+
+
+def test_overlay_adds_eta():
+    """The overlay only estimates when it has the stop position and a tracker."""
+    t0 = datetime(2026, 7, 25, 14, 0, 0)
+    tracker = VehicleTracker()
+
+    def deps(scheduled="14:05"):
+        return build_departures(
+            {"190": [{"czas": f"{scheduled}:00", "kierunek": "Ursynów", "brygada": "2"}]},
+            t0,
+        )
+
+    plain = deps()
+    overlay_gps(plain, [_vehicle(1000, t0)], now=t0)
+    check(plain[0]["live"] is True, "the departure is still flagged live without a tracker")
+    check(plain[0]["eta_minutes"] is None, "no ETA without the stop's coordinates")
+
+    first = deps()
+    overlay_gps(
+        first, [_vehicle(1000, t0)],
+        stop_location=(STOP_LAT, STOP_LON), tracker=tracker, stop_key=STOP_KEY, now=t0,
+    )
+    check(first[0]["eta_source"] == "approx", "the first overlay estimates approximately")
+
+    t1 = t0 + timedelta(seconds=60)
+    second = deps()
+    overlay_gps(
+        second, [_vehicle(700, t1)],
+        stop_location=(STOP_LAT, STOP_LON), tracker=tracker, stop_key=STOP_KEY, now=t1,
+    )
+    check(second[0]["eta_source"] == "tracked", "the next overlay uses the measured speed")
+    check(second[0]["eta_time"] == "14:03", f"ETA lands beside the schedule: {second[0]}")
+    check(second[0]["delay_minutes"] == -2, "an early arrival shows a negative delay")
+
+
+def test_overlay_claims_only_the_next_run():
+    """A brigade comes back around; one vehicle must not light up both runs."""
+    now = datetime(2026, 7, 25, 14, 0, 0)
+    deps = build_departures(
+        {
+            "190": [
+                {"czas": "14:05:00", "kierunek": "Ursynów", "brygada": "2"},
+                {"czas": "15:20:00", "kierunek": "Ursynów", "brygada": "2"},
+            ]
+        },
+        now,
+    )
+    overlay_gps(deps, [_vehicle(1000, now)], now=now)
+    check(deps[0]["live"] is True, "the soonest run is matched to the vehicle")
+    check(deps[1]["live"] is False, "the same brigade's later run is not")
+
+
+def test_overlay_ignores_stale_vehicles():
+    now = datetime(2026, 7, 25, 14, 0, 0)
+    deps = build_departures(
+        {"190": [{"czas": "14:05:00", "kierunek": "Ursynów", "brygada": "2"}]}, now
+    )
+    overlay_gps(deps, [_vehicle(1000, datetime(2024, 12, 2, 9, 0))], now=now)
+    check(deps[0]["live"] is False, "a vehicle reporting a months-old fix is not live")
+
+
+def test_stop_coordinate_lookup():
+    row = {"zespol": "7009", "slupek": "01", "szer_geo": "52.219450", "dlug_geo": "21.011280"}
+    check(stop_coords(row) == (52.21945, 21.01128), "stop coordinates parse from strings")
+    check(stop_coords({"zespol": "7009"}) is None, "a row without coordinates yields None")
+    check(stop_coords({"szer_geo": "n/a", "dlug_geo": "1"}) is None, "garbage yields None")
+    check("01" in pole_variants("1"), "an unpadded pole matches the API's '01'")
+    check("1" in pole_variants("01"), "a padded pole matches an unpadded one")
 
 
 def test_service_day():
@@ -400,6 +686,8 @@ def test_lovelace_card_shipped():
         ("window.customCards.push", "card is listed in the dashboard card picker"),
         ("getConfigElement", "card exposes the GUI editor"),
         ("attributes.departures", "card reads the sensor's departures attribute"),
+        ("eta_time", "card renders the live arrival estimate"),
+        ("delay_minutes", "card renders the delay against the timetable"),
     ]:
         check(snippet in card, msg)
 
@@ -451,6 +739,23 @@ if __name__ == "__main__":
     test_build_departures()
     test_overlay_gps()
     test_overlay_gps_mixed_feeds()
+    test_haversine()
+    test_parse_fix_time()
+    test_is_live_needs_a_recent_fix()
+    test_eta_from_closing_distance()
+    test_eta_ignores_a_repeated_fix()
+    test_eta_suppressed_when_moving_away()
+    test_eta_withheld_for_a_parked_vehicle()
+    test_eta_survives_a_stop_at_a_light()
+    test_moving_away_does_not_flap()
+    test_eta_withheld_for_a_layover()
+    test_eta_rejects_unusable_fixes()
+    test_eta_at_the_stop()
+    test_tracker_prune()
+    test_overlay_adds_eta()
+    test_overlay_claims_only_the_next_run()
+    test_overlay_ignores_stale_vehicles()
+    test_stop_coordinate_lookup()
     test_service_day()
     test_daily_cache()
     test_daily_cache_single_flight()

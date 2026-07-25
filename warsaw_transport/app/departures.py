@@ -2,7 +2,8 @@
 
 Merges the timetables of every line serving a stop pole, parses the `czas`
 departure time (which may exceed 24h for after-midnight service), keeps only
-future departures, sorts them, and optionally overlays live GPS vehicle data.
+future departures, sorts them, and optionally overlays live GPS vehicle data —
+including an arrival estimate for matched vehicles (see eta.py).
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from .eta import VehicleTracker, blank_eta, fix_age, is_live, parse_fix_time
 from .warsaw_api import WarsawApiClient
 
 log = logging.getLogger("warsaw_transport.departures")
@@ -70,6 +72,9 @@ def build_departures(
                     "live": False,
                     "lat": None,
                     "lon": None,
+                    # ETA fields stay present but empty when there is no live
+                    # vehicle, so consumers (card, templates) see one row shape.
+                    **blank_eta(status=None),
                 }
             )
 
@@ -77,24 +82,87 @@ def build_departures(
     return merged[:limit]
 
 
-def overlay_gps(
-    departures: list[dict[str, Any]],
+def index_vehicles(
     vehicles: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Attach live position to departures that match a vehicle by (line, brigade)."""
+    now: datetime,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Index a GPS snapshot by (line, brigade), keeping the freshest fix.
+
+    Duplicate keys are rare but do happen (a vehicle swap mid-run leaves both
+    reporting), and the older of the two would drag the ETA backwards.
+    """
     index: dict[tuple[str, str], dict[str, Any]] = {}
     for v in vehicles:
         key = (str(v.get("Lines", "")).strip(), str(v.get("Brigade", "")).strip())
-        index[key] = v
+        current = index.get(key)
+        if current is None:
+            index[key] = v
+            continue
+        age, current_age = fix_age(v, now), fix_age(current, now)
+        if age is not None and (current_age is None or age < current_age):
+            index[key] = v
+    return index
 
-    for dep in departures:
-        v = index.get((dep["line"], dep["brigade"]))
-        if v is not None:
-            dep["live"] = True
-            dep["lat"] = v.get("Lat")
-            dep["lon"] = v.get("Lon")
-            dep["vehicle"] = v.get("VehicleNumber")
+
+def overlay_gps(
+    departures: list[dict[str, Any]],
+    vehicles: list[dict[str, Any]],
+    *,
+    stop_location: tuple[float, float] | None = None,
+    tracker: VehicleTracker | None = None,
+    stop_key: str = "",
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Attach live position — and, when possible, an ETA — to departures.
+
+    A departure matches a vehicle by (line, brigade), which identifies a *trip*
+    rather than a vehicle: the same brigade comes back around later in the day,
+    so the match is given to the soonest unclaimed departure only. Without that,
+    a bus visible now would also light up its 15:20 run.
+
+    An ETA needs the stop's coordinates and a `tracker` to hold the vehicle's
+    position history across polls; with either missing, only `live` is set.
+    """
+    now = now or datetime.now()
+    index = index_vehicles(vehicles, now)
+
+    claimed: set[tuple[str, str]] = set()
+    for dep in sorted(departures, key=lambda d: str(d.get("timestamp", ""))):
+        key = (dep["line"], dep["brigade"])
+        if key in claimed:
+            continue
+        v = index.get(key)
+        if v is None or not is_live(v, now):
+            continue
+        claimed.add(key)
+        dep["live"] = True
+        dep["lat"] = v.get("Lat")
+        dep["lon"] = v.get("Lon")
+        dep["vehicle"] = v.get("VehicleNumber")
+
+        if tracker is not None and stop_location is not None:
+            scheduled = parse_timestamp(dep.get("timestamp"))
+            dep.update(
+                tracker.estimate(
+                    stop_key,
+                    stop_location[0],
+                    stop_location[1],
+                    v,
+                    scheduled=scheduled,
+                    now=now,
+                )
+            )
     return departures
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    """Read back the ISO `timestamp` a departure row carries."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return parse_fix_time(value)
 
 
 async def fetch_vehicles(
@@ -130,6 +198,8 @@ async def next_departures(
     gps_overlay: bool = True,
     vehicle_types: tuple[int, ...] = VEHICLE_TYPES,
     vehicles: list[dict[str, Any]] | None = None,
+    stop_location: tuple[float, float] | None = None,
+    tracker: VehicleTracker | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Full pipeline: fetch lines, fetch all timetables, merge, overlay GPS.
@@ -137,6 +207,10 @@ async def next_departures(
     `vehicles` lets a caller share one GPS snapshot across several stops. `None`
     means "fetch it here"; a list — including an empty one — is used as-is and
     issues no request.
+
+    `stop_location` (lat, lon) and a long-lived `tracker` enable the arrival
+    estimate; the tracker must be shared across polls, since one snapshot on its
+    own says nothing about speed.
     """
     now = now or datetime.now()
 
@@ -160,6 +234,13 @@ async def next_departures(
     if gps_overlay and departures:
         if vehicles is None:
             vehicles = await fetch_vehicles(client, vehicle_types)
-        overlay_gps(departures, vehicles)
+        overlay_gps(
+            departures,
+            vehicles,
+            stop_location=stop_location,
+            tracker=tracker,
+            stop_key=f"{busstop_id}|{pole}",
+            now=now,
+        )
 
     return departures

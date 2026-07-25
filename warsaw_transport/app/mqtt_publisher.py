@@ -94,6 +94,10 @@ class MqttPublisher:
             "stop_name": stop.get("name"),
             "busstop_id": stop.get("busstop_id"),
             "pole": stop.get("pole"),
+            # The state stays on the timetable so existing automations keep their
+            # meaning; the live estimate for the next departure is offered here
+            # alongside it, and is None whenever that departure is not tracked.
+            "next_eta_minutes": departures[0].get("eta_minutes") if departures else None,
             "departures": departures,
         }
         self._client.publish(

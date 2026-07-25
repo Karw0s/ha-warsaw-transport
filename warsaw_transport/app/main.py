@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, load_settings
 from .departures import fetch_vehicles, next_departures
+from .eta import VehicleTracker, to_float
 from .mqtt_publisher import MqttPublisher
 from .store import StopStore
 from .warsaw_api import WarsawApiClient, WarsawApiError
@@ -30,9 +31,37 @@ class AppState:
     store: StopStore
     mqtt: MqttPublisher | None = None
     poller: asyncio.Task | None = None
+    # One tracker for the whole process: the arrival estimate is built from how a
+    # vehicle's distance to the stop changes between polls, so the history has to
+    # outlive a single request and be shared by the poller and the panel.
+    tracker: VehicleTracker = VehicleTracker()
 
 
 state = AppState()
+
+
+async def stop_location(stop: dict[str, Any]) -> tuple[float, float] | None:
+    """Coordinates for a stop, needed to estimate arrivals.
+
+    Stops added through the panel bring their own; older ones are resolved once
+    from the cached city stop list and written back. A failure here is not fatal
+    — the stop simply gets no ETA.
+    """
+    lat, lon = stop.get("lat"), stop.get("lon")
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        return float(lat), float(lon)
+
+    try:
+        found = await state.client.stop_location(stop["busstop_id"], stop["pole"])
+    except WarsawApiError as exc:
+        log.warning("No coordinates for %s (%s); skipping its ETA.", stop["id"], exc)
+        return None
+    if found is None:
+        log.warning("Stop %s is not in the city stop list; skipping its ETA.", stop["id"])
+        return None
+
+    state.store.set_location(stop["id"], *found)
+    return found
 
 
 async def compute_and_publish(
@@ -40,6 +69,7 @@ async def compute_and_publish(
     vehicles: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Compute departures for a stop and push to MQTT (if enabled)."""
+    location = await stop_location(stop) if state.settings.gps_overlay else None
     departures = await next_departures(
         state.client,
         stop["busstop_id"],
@@ -47,6 +77,8 @@ async def compute_and_publish(
         limit=5,
         gps_overlay=state.settings.gps_overlay,
         vehicles=vehicles,
+        stop_location=location,
+        tracker=state.tracker,
     )
     if state.mqtt is not None:
         state.mqtt.publish_state(stop, departures)
@@ -81,6 +113,7 @@ async def poll_loop() -> None:
             except Exception:  # noqa: BLE001 - keep the loop alive
                 log.exception("Unexpected error updating stop %s", stop["id"])
 
+        state.tracker.prune()
         await state.client.flush_caches()
         log.info(
             "Poll sweep: %d stop(s), %d API call(s) in %.1fs.",
@@ -208,10 +241,15 @@ async def add_stop(payload: dict[str, Any]) -> Any:
     pole = str(payload.get("pole", "")).strip()
     if not busstop_id or not pole:
         raise HTTPException(status_code=400, detail="busstop_id and pole are required")
+    # Coordinates come from the search result; they are only used for the ETA, so
+    # an unparseable pair is dropped rather than rejected.
+    lat, lon = to_float(payload.get("lat")), to_float(payload.get("lon"))
     stop = state.store.add(
         busstop_id,
         pole,
         payload.get("name", f"{busstop_id}/{pole}"),
+        lat=lat,
+        lon=lon,
     )
     if state.mqtt is not None:
         state.mqtt.publish_discovery(stop)
@@ -237,12 +275,15 @@ async def departures_for(stop_id: str) -> Any:
     if stop is None:
         raise HTTPException(status_code=404, detail="stop not found")
     try:
+        location = await stop_location(stop) if state.settings.gps_overlay else None
         deps = await next_departures(
             state.client,
             stop["busstop_id"],
             stop["pole"],
             limit=5,
             gps_overlay=state.settings.gps_overlay,
+            stop_location=location,
+            tracker=state.tracker,
         )
     except WarsawApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

@@ -5,6 +5,13 @@ dashboard. Pick bus/tram stops in the add-on's web panel and each one is publish
 Home Assistant as a sensor (via MQTT Discovery) showing the **next 5 departures** relative
 to the current time, using scheduled timetables augmented with a **live GPS overlay**.
 
+When a departure is matched to a vehicle that is on its way, the add-on also estimates
+**when it will actually arrive** — from how fast the vehicle's distance to your stop is
+closing between polls, since the API publishes positions only. The estimate sits next to
+the scheduled time with its delay (`14:05 → 14:07 +2`), and is withheld rather than guessed
+when the positions cannot support one; see
+[`warsaw_transport/DOCS.md`](warsaw_transport/DOCS.md) §5.1.
+
 It also ships a **custom Lovelace card** that puts a stop on your dashboard in the style of
 the built-in weather card — the next departure as a big countdown, the four after it in a
 forecast-style row. The add-on installs the card for you; see

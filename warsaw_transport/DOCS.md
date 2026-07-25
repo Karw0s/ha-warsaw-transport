@@ -45,11 +45,44 @@ Removing a stop in the panel also removes its Home Assistant entity.
 
 Each stop sensor:
 
-- **State** — minutes until the next departure (`min`).
-- **Attributes** — `stop_name`, `busstop_id`, `pole`, and a
-  `departures` list of the next 5:
-  `{ line, direction, time, minutes, brigade, live, lat, lon }`.
+- **State** — minutes until the next **scheduled** departure (`min`). It stays on
+  the timetable even when a live estimate exists, so automations keep one meaning.
+- **Attributes** — `stop_name`, `busstop_id`, `pole`, `next_eta_minutes` (the live
+  estimate for the first departure, or `null`), and a `departures` list of the
+  next 5:
+  `{ line, direction, time, minutes, brigade, live, lat, lon, eta_time,
+  eta_minutes, eta_timestamp, delay_minutes, eta_source, eta_status, distance_m }`.
   `live: true` means the departure is currently matched to a tracked vehicle.
+
+### 5.1 The arrival estimate
+
+The city API publishes vehicle positions and nothing else — no predicted arrivals
+and no route geometry. The add-on estimates the arrival from how quickly the gap
+between the vehicle and your stop is closing from one poll to the next, so traffic
+and detours are already reflected in the number.
+
+| Field | Meaning |
+|---|---|
+| `eta_time` | Estimated arrival, `HH:MM` (`eta_timestamp` is the full ISO value). |
+| `eta_minutes` | Minutes until that arrival, at the moment the add-on published it. |
+| `delay_minutes` | Estimate minus timetable: `+3` is three minutes late, `-1` early. |
+| `eta_source` | `tracked` — measured from two or more GPS fixes. `approx` — a rough figure from a typical urban speed, used for the first ~30 s after a vehicle appears. |
+| `eta_status` | `ok`, or why there is no estimate (below). |
+| `distance_m` | Straight-line distance from the vehicle to the stop. |
+
+An estimate is withheld — `eta_time: null`, with the departure still marked
+`live` — when the vehicle's positions cannot support one:
+
+| `eta_status` | Meaning |
+|---|---|
+| `moving_away` | The vehicle is getting further from the stop; a brigade runs back and forth all day, so it is on another leg of its run. |
+| `stalled` | It has not moved at all since it was first seen, e.g. parked mid-run. |
+| `waiting` | The estimate lands far ahead of the timetable — a layover at a terminus, where the schedule is the better predictor. |
+| `stale_fix` | Its last GPS fix is too old to trust. |
+| `too_far` | It is more than 20 km away. |
+
+Estimates need `gps_overlay: true` (the default) and the stop's coordinates, which
+the add-on stores when you add it.
 
 ## 6. The dashboard card
 
@@ -105,6 +138,14 @@ The countdown is recalculated in the browser every 30 seconds, so the minutes
 keep ticking down between add-on refreshes. A green **● live** marker means the
 departure is matched to a vehicle currently reporting its GPS position — exactly
 the same data the add-on's own web panel shows.
+
+When that vehicle's position supports an estimate, it appears beside the
+scheduled time as `14:05 → 14:07`, with the delay as a chip: amber when the bus
+is running late, green when it is on time or early. A `~` before the time (as in
+`→ ~14:07`) marks a rough first guess, replaced by a measured one within about a
+poll. The big countdown always stays on the timetable, so it means the same thing
+whether or not a vehicle is being tracked — see §5.1 for how the estimate is made
+and when it is deliberately left out.
 
 ### 6.4 Alternatives without the card
 
@@ -169,6 +210,12 @@ not just a restart, for the new mount to take effect.
 - The ZTM API exposes timetables for the **current day only**; lines that do not
   run today will have no departures.
 - The GPS overlay is best-effort — a scheduled departure is flagged `live` only
-  when a vehicle reporting the same line **and brigade** is currently online. Both
-  the bus and the tram feed are checked, so a stop served by both is fully covered.
+  when a vehicle reporting the same line **and brigade** is currently online, with
+  a recent GPS fix. Both the bus and the tram feed are checked, so a stop served
+  by both is fully covered.
+- The arrival estimate is exactly that: a straight-line calculation from vehicle
+  positions, since the API publishes no route geometry and no predicted arrivals.
+  It is at its best for a vehicle already on its way to you and a few minutes out;
+  it is withheld rather than guessed when the positions say nothing useful (§5.1).
+  Treat it as a better-informed guess than the timetable, not as gospel.
 - Data © City of Warsaw, provided under Creative Commons Attribution.
