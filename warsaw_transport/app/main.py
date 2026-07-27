@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings, load_settings
-from .departures import fetch_vehicles, next_departures
+from .departures import fetch_vehicles, next_departures, vehicle_types_for_stops
 from .eta import VehicleTracker, to_float
 from .mqtt_publisher import MqttPublisher
 from .routes import RouteCatalog, build_provider
@@ -121,14 +121,16 @@ async def poll_loop() -> None:
         calls_before = state.client.calls_made
         stops = state.store.list_stops()
 
-        # The GPS feeds are city-wide and stop-independent, so fetch them once
-        # per sweep and share the snapshot with every stop. Passing [] (not
-        # None) on failure means the stops skip the overlay instead of each
-        # retrying the download.
+        # A GPS feed is city-wide and stop-independent, so fetch it once per
+        # sweep and share the snapshot with every stop. Only the feeds the
+        # tracked stops actually need are downloaded — a tram-only stop list
+        # halves the sweep. Passing [] (not None) on failure means the stops skip
+        # the overlay instead of each retrying the download.
         vehicles: list[dict[str, Any]] | None = None
         if stops and state.settings.gps_overlay:
             try:
-                vehicles = await fetch_vehicles(state.client)
+                types = await vehicle_types_for_stops(state.client, stops)
+                vehicles = await fetch_vehicles(state.client, types) if types else []
             except WarsawApiError as exc:
                 log.warning("GPS feeds unavailable this cycle: %s", exc)
                 vehicles = []

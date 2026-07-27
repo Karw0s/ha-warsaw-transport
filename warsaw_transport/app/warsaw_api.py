@@ -26,7 +26,7 @@ import logging
 import os
 import time
 import unicodedata
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
@@ -62,7 +62,16 @@ EP_LABELS = {
     EP_TIMETABLE: "timetable",
     EP_VEHICLES: "vehicles",
 }
-VEHICLE_TYPE_NAMES = {1: "bus", 2: "tram"}
+BUS = 1
+TRAM = 2
+VEHICLE_TYPE_NAMES = {BUS: "bus", TRAM: "tram"}
+
+# Warsaw numbers its tram lines 1..99 and its bus lines from 100 up, so the line
+# alone says which GPS feed carries it. Lettered codes (L-8, N44, Z1, E-2) are
+# always buses — there are no lettered tram lines. Metro and rail codes appear in
+# the line list of some poles but are in neither feed.
+MAX_TRAM_LINE = 100
+NO_GPS_PREFIXES = ("M", "S", "R", "WKD", "KM")
 
 # "ł" is a standalone codepoint that does not decompose under NFKD, so stripping
 # combining marks alone would leave it in place.
@@ -106,6 +115,41 @@ def describe_call(endpoint: str, payload: dict[str, Any] | None = None) -> str:
         return label
     params = " ".join(f"{key}={value}" for key, value in payload.items())
     return f"{label} {params}"
+
+
+def vehicle_type_for_line(line: Any) -> int | None:
+    """Which GPS feed carries a line: 1 = bus, 2 = tram, None = neither.
+
+    Lets a caller fetch only the feeds its stops need instead of both. Lines stay
+    strings throughout (see .claude/docs/endpoint-lista-linii.md — "L-8" and "N44"
+    are real line codes); only a fully numeric code is read as a number, and then
+    only to compare it against the tram/bus boundary. Pure function.
+    """
+    code = str(line).strip().upper()
+    if not code:
+        return None
+    if code.isdigit():
+        return TRAM if int(code) < MAX_TRAM_LINE else BUS
+
+    letters = 0
+    while letters < len(code) and code[letters].isalpha():
+        letters += 1
+    if code[:letters] in NO_GPS_PREFIXES:
+        return None
+    # Anything else lettered is a bus: L (local), N (night), Z (substitute),
+    # E (express), C (cemetery). Unknown codes land here too, which costs a feed
+    # that may be unnecessary rather than dropping live data.
+    return BUS
+
+
+def vehicle_types_for_lines(lines: Iterable[Any]) -> tuple[int, ...]:
+    """The feed types needed to cover `lines`, sorted and de-duplicated.
+
+    Empty when no line has a GPS feed at all (a metro-only pole), which callers
+    read as "make no vehicle request".
+    """
+    types = {vehicle_type_for_line(line) for line in lines}
+    return tuple(sorted(t for t in types if t is not None))
 
 
 def normalize(text: Any) -> str:

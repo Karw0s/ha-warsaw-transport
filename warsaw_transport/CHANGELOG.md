@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.1
+
+- **Only the GPS feeds your stops need are downloaded.** The live-position
+  endpoint serves one mode per call, and until now both were fetched every
+  cycle. Warsaw numbers its trams 1–99 and its buses from 100 up, so the lines
+  calling at your stops say which feeds matter: track only tram poles and the
+  sweep drops to **one** API call, track only bus poles and the same. A stop
+  served by both modes is unchanged at two, and a lettered line (`L-8`, `N44`,
+  `Z1`) counts as a bus. Nothing to configure.
+- Metro-only poles (`M1`, `M2`) now make no live-position request at all —
+  those lines are in neither feed.
+- If a stop's line list cannot be read, both feeds are fetched as before: a
+  lookup failure costs the saving, never the live data.
+
 ## 0.6.0
 
 - **Arrival estimates can now be measured along the vehicle's route.** Given the

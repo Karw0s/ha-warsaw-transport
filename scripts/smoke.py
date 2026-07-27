@@ -20,6 +20,7 @@ from app.departures import (  # noqa: E402
     next_departures,
     overlay_gps,
     parse_czas,
+    vehicle_types_for_stops,
 )
 from app.eta import VehicleTracker, haversine_m, is_live, parse_fix_time  # noqa: E402
 from app.routes import (  # noqa: E402
@@ -37,12 +38,15 @@ from app.warsaw_api import (  # noqa: E402
     EP_STOPS,
     EP_TIMETABLE,
     EP_VEHICLES,
+    WarsawApiError,
     _flatten,
     describe_call,
     match_stops,
     normalize,
     pole_variants,
     stop_coords,
+    vehicle_type_for_line,
+    vehicle_types_for_lines,
 )
 
 
@@ -873,6 +877,8 @@ class _FakeClient:
     def __init__(self, lines=("190", "500")):
         self._lines = list(lines)
         self.calls = {"lines": 0, "timetable": 0, "vehicles": 0}
+        # Which GPS feeds were asked for, in call order.
+        self.vehicle_types = []
 
     async def lines_for_stop(self, busstop_id, pole):
         self.calls["lines"] += 1
@@ -884,17 +890,28 @@ class _FakeClient:
 
     async def vehicle_positions(self, vehicle_type, line=None):
         self.calls["vehicles"] += 1
-        return [{"Lines": "190", "Brigade": "2", "Lat": 52.2, "Lon": 21.0}]
+        self.vehicle_types.append(vehicle_type)
+        # Answer with a line of the requested mode, so a test can tell which feed
+        # produced an overlay rather than only counting calls.
+        return [
+            {
+                "Lines": "190" if vehicle_type == 1 else "15",
+                "Brigade": "2",
+                "Lat": 52.2,
+                "Lon": 21.0,
+            }
+        ]
 
 
 def test_shared_vehicle_snapshot():
     """The GPS feeds are city-wide: one snapshot must serve every tracked stop."""
     now = datetime(2026, 7, 25, 14, 0, 0)
 
-    # Left to itself, a stop fetches one snapshot per vehicle type.
+    # Left to itself, a stop fetches a snapshot — but only of the feeds its own
+    # lines need; 190 and 500 are buses.
     client = _FakeClient()
     run(next_departures(client, "7009", "01", now=now))
-    check(client.calls["vehicles"] == 2, "unshared call fetches the bus and tram feeds")
+    check(client.vehicle_types == [1], "unshared call fetches only the feed the lines need")
 
     # A caller that already has a snapshot must issue no vehicle request at all,
     # however many stops it processes.
@@ -910,6 +927,90 @@ def test_shared_vehicle_snapshot():
     client = _FakeClient()
     run(next_departures(client, "7009", "01", vehicles=[], now=now))
     check(client.calls["vehicles"] == 0, "an empty snapshot skips the overlay, no refetch")
+
+
+def test_vehicle_type_for_line():
+    """Warsaw numbers trams 1..99 and buses 100+; lettered codes are all buses."""
+    cases = {
+        "1": 2,
+        "15": 2,
+        "99": 2,
+        "100": 1,
+        "190": 1,
+        "523": 1,
+        # Lettered lines: local, night, substitute, express — never trams.
+        "L-8": 1,
+        "L33": 1,
+        "N44": 1,
+        "Z1": 1,
+        "E-2": 1,
+        # Metro and rail show up at some poles but are in neither GPS feed.
+        "M1": None,
+        "M2": None,
+        "S2": None,
+        "": None,
+    }
+    for line, expected in cases.items():
+        got = vehicle_type_for_line(line)
+        check(got == expected, f"line {line!r} -> feed {got}")
+
+    check(vehicle_type_for_line(" 15 ") == 2, "the line is stripped before classifying")
+    check(
+        vehicle_types_for_lines(["15", "33", "190", "M1"]) == (1, 2),
+        "a mixed pole needs both feeds, de-duplicated and sorted",
+    )
+    check(vehicle_types_for_lines(["15", "33"]) == (2,), "a tram-only pole needs one feed")
+    check(vehicle_types_for_lines(["M1", "M2"]) == (), "a metro-only pole needs no feed")
+
+
+def test_feed_selection_per_stop():
+    """A stop must download only the GPS feeds its own lines can appear in."""
+    now = datetime(2026, 7, 25, 14, 0, 0)
+
+    client = _FakeClient(lines=("15", "33"))
+    deps = run(next_departures(client, "7009", "01", now=now))
+    check(client.vehicle_types == [2], "a tram-only stop skips the bus feed")
+    check(any(d["live"] for d in deps), "the tram feed still overlays its departures")
+
+    client = _FakeClient(lines=("15", "190"))
+    run(next_departures(client, "7009", "01", now=now))
+    check(sorted(client.vehicle_types) == [1, 2], "a mixed stop still fetches both feeds")
+
+    client = _FakeClient(lines=("M1",))
+    deps = run(next_departures(client, "7009", "01", now=now))
+    check(client.calls["vehicles"] == 0, "a metro-only stop makes no GPS request")
+    check(deps and not any(d["live"] for d in deps), "its departures are scheduled-only")
+
+
+def test_vehicle_types_for_stops():
+    """The poller's feed set is the union over every tracked stop."""
+
+    class _Failing(_FakeClient):
+        async def lines_for_stop(self, busstop_id, pole):
+            raise WarsawApiError("boom")
+
+    def stop(stop_id, pole="01"):
+        return {"id": f"{stop_id}-{pole}", "busstop_id": stop_id, "pole": pole}
+
+    trams = _FakeClient(lines=("15", "33"))
+    check(
+        run(vehicle_types_for_stops(trams, [stop("7009"), stop("7009", "02")])) == (2,),
+        "tram-only stops resolve to the tram feed alone",
+    )
+
+    mixed = _FakeClient(lines=("15", "190"))
+    check(
+        run(vehicle_types_for_stops(mixed, [stop("7009")])) == (1, 2),
+        "a stop served by both modes resolves to both feeds",
+    )
+
+    check(run(vehicle_types_for_stops(_FakeClient(), [])) == (), "no stops, no feeds")
+
+    # A line list we cannot read must cost the saving, not the live data.
+    check(
+        run(vehicle_types_for_stops(_Failing(), [stop("7009")])) == (1, 2),
+        "an unreadable line list falls back to every feed",
+    )
 
 
 def test_card_install_detection():
@@ -1041,6 +1142,9 @@ if __name__ == "__main__":
     test_daily_cache_persistence()
     test_describe_call()
     test_shared_vehicle_snapshot()
+    test_vehicle_type_for_line()
+    test_feed_selection_per_stop()
+    test_vehicle_types_for_stops()
     test_lovelace_card_shipped()
     test_card_install_detection()
     print("\nAll smoke tests passed.")

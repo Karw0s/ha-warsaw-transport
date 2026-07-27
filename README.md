@@ -48,7 +48,7 @@ actually changes is refetched:
 
 | Endpoint | How often |
 |---|---|
-| `get_ztm_lokalizacja_pojazdow` (live GPS) | Twice per sweep — one bus feed, one tram feed — **shared by every tracked stop**. |
+| `get_ztm_lokalizacja_pojazdow` (live GPS) | Once or twice per sweep — **only the feeds your stops need** (trams are lines 1–99, buses 100+), **shared by every tracked stop**. |
 | `get_ztm_lista_linii_na_przystanku` (lines at a pole) | Once per stop per service day. |
 | `get_ztm_odjazdy_linii_z_przystanku` (timetable) | Once per stop+line per service day (the API publishes it daily). |
 | `get_ztm_przystanki_komunikacji_miejskiej` (stop list) | Once a day, on demand when searching. |

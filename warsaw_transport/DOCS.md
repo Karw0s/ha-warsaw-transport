@@ -248,8 +248,10 @@ not just a restart, for the new mount to take effect.
   run today will have no departures.
 - The GPS overlay is best-effort — a scheduled departure is flagged `live` only
   when a vehicle reporting the same line **and brigade** is currently online, with
-  a recent GPS fix. Both the bus and the tram feed are checked, so a stop served
-  by both is fully covered.
+  a recent GPS fix. The bus and tram feeds are separate downloads, and only the
+  ones your stops need are fetched — a tram-only stop list never pulls the bus
+  feed — so a stop served by both modes is still fully covered, at no cost to
+  one served by a single mode.
 - The arrival estimate is exactly that: a straight-line calculation from vehicle
   positions, since the API publishes no route geometry and no predicted arrivals.
   It is at its best for a vehicle already on its way to you and a few minutes out;

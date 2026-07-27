@@ -13,12 +13,15 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from .eta import VehicleTracker, blank_eta, fix_age, is_live, parse_fix_time
-from .warsaw_api import WarsawApiClient
+from .warsaw_api import WarsawApiClient, vehicle_types_for_lines
 
 log = logging.getLogger("warsaw_transport.departures")
 
-# The GPS endpoint takes one vehicle type per call (1 = bus, 2 = tram) and has
-# no line filter, so both feeds are fetched wholesale; the client caches them.
+# The GPS endpoint takes one vehicle type per call (1 = bus, 2 = tram) and has no
+# line filter, so each feed is downloaded wholesale; the client caches them. Which
+# feeds are needed is derived from the lines calling at the tracked stops — a
+# tram-only stop list never downloads the bus feed. This pair is the "cover
+# everything" fallback for when the line list is unavailable.
 VEHICLE_TYPES = (1, 2)
 
 
@@ -181,12 +184,13 @@ async def fetch_vehicles(
     client: WarsawApiClient,
     vehicle_types: tuple[int, ...] = VEHICLE_TYPES,
 ) -> list[dict[str, Any]]:
-    """One (cached) GPS snapshot per vehicle type, concatenated.
+    """One (cached) GPS snapshot per requested vehicle type, concatenated.
 
-    A pole can be served by both buses and trams, so both feeds are needed. The
-    result is stop-independent, so callers tracking several stops should fetch
-    it once and pass it to `next_departures` rather than letting each stop
-    trigger its own fetch.
+    A pole can be served by both buses and trams, so pass both types when the
+    stops need both — see `vehicle_types_for_stops`. The result is
+    stop-independent, so callers tracking several stops should fetch it once and
+    pass it to `next_departures` rather than letting each stop trigger its own
+    fetch.
     """
     vehicle_lists = await asyncio.gather(
         *(client.vehicle_positions(t) for t in vehicle_types),
@@ -201,6 +205,39 @@ async def fetch_vehicles(
     return vehicles
 
 
+async def vehicle_types_for_stops(
+    client: WarsawApiClient,
+    stops: list[dict[str, Any]],
+) -> tuple[int, ...]:
+    """The GPS feeds the tracked stops need, as a union over their lines.
+
+    Reads each pole's line list, which is cached for the service day, so this is
+    free after the first sweep. A stop whose line list cannot be read falls back
+    to every feed: a lookup failure should cost the saving, not the live data.
+
+    Empty means no tracked stop has a line with a GPS feed, so no request at all.
+    """
+    if not stops:
+        return ()
+
+    results = await asyncio.gather(
+        *(client.lines_for_stop(stop["busstop_id"], stop["pole"]) for stop in stops),
+        return_exceptions=True,
+    )
+    types: set[int] = set()
+    for stop, res in zip(stops, results):
+        if isinstance(res, Exception):
+            log.warning(
+                "Line list unavailable for %s, using every GPS feed: %s",
+                stop.get("id", stop["busstop_id"]),
+                res,
+            )
+            types.update(VEHICLE_TYPES)
+            continue
+        types.update(vehicle_types_for_lines(res))
+    return tuple(sorted(types))
+
+
 async def next_departures(
     client: WarsawApiClient,
     busstop_id: str,
@@ -208,7 +245,7 @@ async def next_departures(
     *,
     limit: int = 5,
     gps_overlay: bool = True,
-    vehicle_types: tuple[int, ...] = VEHICLE_TYPES,
+    vehicle_types: tuple[int, ...] | None = None,
     vehicles: list[dict[str, Any]] | None = None,
     stop_location: tuple[float, float] | None = None,
     tracker: VehicleTracker | None = None,
@@ -219,7 +256,8 @@ async def next_departures(
 
     `vehicles` lets a caller share one GPS snapshot across several stops. `None`
     means "fetch it here"; a list — including an empty one — is used as-is and
-    issues no request.
+    issues no request. When fetching here, only the feeds this stop's own lines
+    need are downloaded, unless `vehicle_types` overrides that.
 
     `stop_location` (lat, lon) and a long-lived `tracker` enable the arrival
     estimate; the tracker must be shared across polls, since one snapshot on its
@@ -246,7 +284,8 @@ async def next_departures(
 
     if gps_overlay and departures:
         if vehicles is None:
-            vehicles = await fetch_vehicles(client, vehicle_types)
+            types = vehicle_types or vehicle_types_for_lines(lines)
+            vehicles = await fetch_vehicles(client, types) if types else []
         overlay_gps(
             departures,
             vehicles,
